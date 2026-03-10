@@ -120,7 +120,7 @@ require_tools() {
 
 require_gh_auth() {
   if ! gh auth status > /dev/null 2>&1; then
-    echo "GitHub CLI auth is invalid. Re-authenticate with: gh auth login -h github.com"
+    echo "GitHub auth is missing or invalid. Set GH_TOKEN for the agent environment."
     exit 1
   fi
 }

@@ -71,12 +71,13 @@ cd your-repo
 # Add your keys
 echo "OPENAI_API_KEY=sk-..." >> .env
 echo "ANTHROPIC_API_KEY=sk-ant-..." >> .env
+echo "GH_TOKEN=ghp_..." >> .env
 
 agentify init
 agentify run
 ```
 
-agentify loads `.env` from the repo directory (or `~/.agentify.env` as a fallback). Add `.env` to your `.gitignore`.
+agentify loads `.env` from the repo directory (or `~/.agentify.env`). Add `.env` to your `.gitignore`.
 
 ### Run in Docker / Colima
 
@@ -87,12 +88,13 @@ cd your-repo
 # Add your keys
 echo "OPENAI_API_KEY=sk-..." >> .env
 echo "ANTHROPIC_API_KEY=sk-ant-..." >> .env
+echo "GH_TOKEN=ghp_..." >> .env
 
 # Start (builds image on first run)
 /path/to/agentify/start.sh
 ```
 
-`start.sh` builds the image if needed, mounts your repo + git config, loads `.env`, and starts the loop with dashboard.
+`start.sh` builds the image if needed, mounts your repo, injects only `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `GH_TOKEN`, and starts the loop with dashboard.
 
 Dashboard at `http://localhost:4242`. With Tailscale, accessible from any device on your tailnet.
 

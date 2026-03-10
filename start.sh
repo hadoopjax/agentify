@@ -81,6 +81,10 @@ if ! append_env_var ANTHROPIC_API_KEY "$REPO/.env" && ! append_env_var ANTHROPIC
   echo "Missing ANTHROPIC_API_KEY in the shell environment, $REPO/.env, or $SCRIPT_DIR/.env"
   exit 1
 fi
+if ! append_env_var GH_TOKEN "$REPO/.env" && ! append_env_var GH_TOKEN "$SCRIPT_DIR/.env"; then
+  echo "Missing GH_TOKEN in the shell environment, $REPO/.env, or $SCRIPT_DIR/.env"
+  exit 1
+fi
 
 # Build if image doesn't exist
 if ! "${CONTAINER_CMD[@]}" image inspect "$IMAGE" > /dev/null 2>&1; then
@@ -93,7 +97,6 @@ echo "Starting agentify on $(basename "$REPO")..."
 RUN_ARGS=(
   run --rm -it
   -v "$REPO":/repo
-  -v ~/.config/gh:/root/.config/gh:ro
   --env-file "$ENV_FILE"
   -p "$PORT":"$PORT"
   -e DASHBOARD_PORT="$PORT"
