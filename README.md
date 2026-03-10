@@ -68,16 +68,19 @@ export PATH="$PATH:$(pwd)/agentify/bin"
 # Requires: gh, codex, claude, jq, python3
 cd your-repo
 
-# Add your keys
-echo "OPENAI_API_KEY=sk-..." >> .env
-echo "ANTHROPIC_API_KEY=sk-ant-..." >> .env
-echo "GH_TOKEN=ghp_..." >> .env
+# Add agent-only keys
+mkdir -p .agentify
+cat > .agentify/agent.env <<EOF
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...
+GH_TOKEN=ghp_...
+EOF
 
 agentify init
 agentify run
 ```
 
-agentify loads `.env` from the repo directory (or `~/.agentify.env`). Add `.env` to your `.gitignore`.
+agentify loads `.agentify/agent.env` only. Keep agent credentials separate from your app's `.env`.
 
 ### Run in Docker / Colima
 
@@ -85,16 +88,19 @@ agentify loads `.env` from the repo directory (or `~/.agentify.env`). Add `.env`
 git clone https://github.com/hadoopjax/agentify.git
 cd your-repo
 
-# Add your keys
-echo "OPENAI_API_KEY=sk-..." >> .env
-echo "ANTHROPIC_API_KEY=sk-ant-..." >> .env
-echo "GH_TOKEN=ghp_..." >> .env
+# Add agent-only keys
+mkdir -p .agentify
+cat > .agentify/agent.env <<EOF
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...
+GH_TOKEN=ghp_...
+EOF
 
 # Start (builds image on first run)
 /path/to/agentify/start.sh
 ```
 
-`start.sh` builds the image if needed, mounts your repo, injects only `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `GH_TOKEN`, and starts the loop with dashboard.
+`start.sh` builds the image if needed, reads `.agentify/agent.env`, injects only `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `GH_TOKEN`, and starts the loop with dashboard.
 
 Dashboard at `http://localhost:4242`. With Tailscale, accessible from any device on your tailnet.
 

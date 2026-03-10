@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LIB_DIR="$SCRIPT_DIR/../lib"
+AGENT_ENV_FILE="${AGENTIFY_ENV_FILE:-.agentify/agent.env}"
 
 load_env_file() {
   local env_file="$1"
@@ -44,13 +45,8 @@ load_env_file() {
   done < "$env_file"
 }
 
-# Load .env (repo-local, then home) without shell-expanding values.
-for envfile in .env "$HOME/.agentify.env"; do
-  if [ -f "$envfile" ]; then
-    load_env_file "$envfile"
-    break
-  fi
-done
+# Load agent-only environment without touching the app's .env.
+[ -f "$AGENT_ENV_FILE" ] && load_env_file "$AGENT_ENV_FILE"
 
 # Colors
 C_RESET="\033[0m"
@@ -130,6 +126,7 @@ cmd_init() {
   local repo
   repo=$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>/dev/null)
   echo "Setting up agentify for $repo..."
+  mkdir -p .agentify
 
   if gh label list 2>/dev/null | grep -q "^agent	"; then
     echo "  Label 'agent' already exists"
@@ -152,6 +149,11 @@ cmd_init() {
     echo "  Label 'agent-skip' created"
   fi
 
+  echo ""
+  if [ ! -f "$AGENT_ENV_FILE" ]; then
+    printf "OPENAI_API_KEY=\nANTHROPIC_API_KEY=\nGH_TOKEN=\n" > "$AGENT_ENV_FILE"
+    echo "Created $AGENT_ENV_FILE"
+  fi
   echo ""
   echo "Done. Label issues with 'agent', then run: agentify run"
   echo "Or run: agentify triage   to review existing issues"

@@ -6,6 +6,7 @@ IMAGE="agentify"
 PORT="${DASHBOARD_PORT:-4242}"
 COLIMA_LOG="${HOME}/.colima/_lima/colima/ha.stderr.log"
 CONTAINER_CMD=(colima nerdctl --)
+AGENT_ENV_PATH=".agentify/agent.env"
 ENV_FILE=""
 RUN_ARGS=()
 
@@ -72,17 +73,25 @@ fi
 
 # Build a dedicated env file for the agent container.
 mkdir -p "$REPO/.agentify"
+if [ ! -f "$REPO/$AGENT_ENV_PATH" ]; then
+  echo "Missing $REPO/$AGENT_ENV_PATH"
+  echo "Create it with:"
+  echo "  OPENAI_API_KEY=..."
+  echo "  ANTHROPIC_API_KEY=..."
+  echo "  GH_TOKEN=..."
+  exit 1
+fi
 ENV_FILE="$(mktemp "$REPO/.agentify/agentify-env.XXXXXX")"
-if ! append_env_var OPENAI_API_KEY "$REPO/.env" && ! append_env_var OPENAI_API_KEY "$SCRIPT_DIR/.env"; then
-  echo "Missing OPENAI_API_KEY in the shell environment, $REPO/.env, or $SCRIPT_DIR/.env"
+if ! append_env_var OPENAI_API_KEY "$REPO/$AGENT_ENV_PATH"; then
+  echo "Missing OPENAI_API_KEY in $REPO/$AGENT_ENV_PATH"
   exit 1
 fi
-if ! append_env_var ANTHROPIC_API_KEY "$REPO/.env" && ! append_env_var ANTHROPIC_API_KEY "$SCRIPT_DIR/.env"; then
-  echo "Missing ANTHROPIC_API_KEY in the shell environment, $REPO/.env, or $SCRIPT_DIR/.env"
+if ! append_env_var ANTHROPIC_API_KEY "$REPO/$AGENT_ENV_PATH"; then
+  echo "Missing ANTHROPIC_API_KEY in $REPO/$AGENT_ENV_PATH"
   exit 1
 fi
-if ! append_env_var GH_TOKEN "$REPO/.env" && ! append_env_var GH_TOKEN "$SCRIPT_DIR/.env"; then
-  echo "Missing GH_TOKEN in the shell environment, $REPO/.env, or $SCRIPT_DIR/.env"
+if ! append_env_var GH_TOKEN "$REPO/$AGENT_ENV_PATH"; then
+  echo "Missing GH_TOKEN in $REPO/$AGENT_ENV_PATH"
   exit 1
 fi
 
