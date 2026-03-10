@@ -62,29 +62,35 @@ Point agentify at a repo with existing issues:
 ### Run locally
 
 ```bash
-export PATH="$PATH:/path/to/agentify/bin"
-export OPENAI_API_KEY=...
-export ANTHROPIC_API_KEY=...
+git clone https://github.com/hadoopjax/agentify.git
+export PATH="$PATH:$(pwd)/agentify/bin"
 
 # Requires: gh, codex, claude, jq, python3
 cd your-repo
+
+# Add your keys
+echo "OPENAI_API_KEY=sk-..." >> .env
+echo "ANTHROPIC_API_KEY=sk-ant-..." >> .env
+
 agentify init
 agentify run
 ```
 
+agentify loads `.env` from the repo directory (or `~/.agentify.env` as a fallback). Add `.env` to your `.gitignore`.
+
 ### Run in Colima
 
 ```bash
-colima start
-docker build -t agentify /path/to/agentify
+git clone https://github.com/hadoopjax/agentify.git
+docker build -t agentify ./agentify
+
 cd your-repo
+# Make sure .env exists with your keys
 
 docker run --rm -it \
   -v "$(pwd)":/repo \
   -v ~/.config/gh:/root/.config/gh:ro \
   -v ~/.gitconfig:/root/.gitconfig:ro \
-  -e OPENAI_API_KEY \
-  -e ANTHROPIC_API_KEY \
   -p 4242:4242 \
   agentify run
 ```
