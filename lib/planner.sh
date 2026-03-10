@@ -6,14 +6,211 @@ EPICS_DIR="$AGENTIFY_DIR/epics"
 # Call GPT-5.4 via API (no codex, pure planning — no filesystem side effects)
 call_gpt() {
   local prompt="$1"
-  curl -s https://api.openai.com/v1/chat/completions \
+  local response
+  response=$(curl -s https://api.openai.com/v1/chat/completions \
     -H "Authorization: Bearer $OPENAI_API_KEY" \
     -H "Content-Type: application/json" \
     -d "$(jq -nc --arg model "$CODEX_MODEL" --arg prompt "$prompt" '{
       model: $model,
       messages: [{"role": "user", "content": $prompt}],
       reasoning_effort: "high"
-    }')" | jq -r '.choices[0].message.content'
+    }')")
+
+  if echo "$response" | jq -e '.error' > /dev/null 2>&1; then
+    echo "OpenAI planning call failed: $(echo "$response" | jq -r '.error.message // "unknown error"')" >&2
+    return 1
+  fi
+
+  echo "$response" | jq -er '.choices[0].message.content'
+}
+
+extract_json() {
+  python3 -c '
+import json
+import sys
+
+text = sys.stdin.read()
+
+for start, opener, closer in ((text.find("{"), "{", "}"), (text.find("["), "[", "]")):
+    if start == -1:
+        continue
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == "\"":
+                in_string = False
+            continue
+        if ch == "\"":
+            in_string = True
+        elif ch == opener:
+            depth += 1
+        elif ch == closer:
+            depth -= 1
+            if depth == 0:
+                candidate = text[start:i + 1]
+                json.loads(candidate)
+                sys.stdout.write(candidate)
+                raise SystemExit(0)
+
+raise SystemExit(1)
+' 2>/dev/null
+}
+
+reserved_existing_issue_numbers() {
+  [ -d "$EPICS_DIR" ] || return 0
+
+  for epic_file in "$EPICS_DIR"/*.json; do
+    [ -f "$epic_file" ] || continue
+    jq -r '
+      select((.kind // "") == "existing-issues") |
+      .proposals[]? |
+      select((.status // "") != "rejected" and (.status // "") != "complete") |
+      .issue_numbers[]?
+    ' "$epic_file" 2>/dev/null
+  done | awk '!seen[$0]++'
+}
+
+existing_group_candidates() {
+  local issues_json
+  issues_json=$(gh issue list --state open --limit 100 \
+    --json number,title,body,labels,createdAt,updatedAt 2>/dev/null)
+
+  local reserved
+  reserved=$(reserved_existing_issue_numbers | jq -Rsc 'split("\n") | map(select(length > 0) | tonumber)')
+  [ -n "$reserved" ] || reserved="[]"
+
+  echo "$issues_json" | jq -c --argjson reserved "$reserved" '
+    map(. + {
+      label_names: [.labels[]?.name],
+      body: ((.body // "") | gsub("\r"; "") | .[0:280])
+    })
+    | map(. as $issue | select(
+        ($issue.label_names | index("agent")) == null and
+        ($issue.label_names | index("agent-wip")) == null and
+        ($issue.label_names | index("agent-skip")) == null and
+        ($reserved | index($issue.number)) == null
+      ))
+    | map({
+        number,
+        title,
+        body,
+        labels: .label_names,
+        created_at: .createdAt,
+        updated_at: .updatedAt
+      })
+  '
+}
+
+normalize_existing_group_plan() {
+  local issues_json="$1"
+  local claude_groups_json="$2"
+  local gpt_critique_json="$3"
+
+  python3 - "$issues_json" "$claude_groups_json" "$gpt_critique_json" <<'PY'
+import json
+import sys
+
+issues = json.loads(sys.argv[1] or "[]")
+claude = json.loads(sys.argv[2] or "{}")
+gpt = json.loads(sys.argv[3] or "{}")
+
+valid = {issue["number"] for issue in issues}
+claimed = set()
+proposals = []
+
+def as_priority(value):
+    value = (value or "medium").lower()
+    return value if value in {"high", "medium", "low"} else "medium"
+
+def normalize_waves(issue_numbers, raw_waves):
+    allowed = set(issue_numbers)
+    seen = set()
+    waves = []
+
+    if isinstance(raw_waves, list):
+      for wave in raw_waves:
+        if not isinstance(wave, list):
+          continue
+        normalized = []
+        for value in wave:
+          if isinstance(value, int) and value in allowed and value not in seen:
+            normalized.append(value)
+            seen.add(value)
+        if normalized:
+          waves.append(normalized)
+
+    for num in issue_numbers:
+      if num not in seen:
+        waves.append([num])
+
+    return waves
+
+def append_groups(groups, source):
+    if not isinstance(groups, list):
+        return
+
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+
+        raw_numbers = group.get("issue_numbers")
+        if not isinstance(raw_numbers, list):
+            continue
+
+        issue_numbers = []
+        for value in raw_numbers:
+            if isinstance(value, int) and value in valid and value not in claimed and value not in issue_numbers:
+                issue_numbers.append(value)
+
+        if len(issue_numbers) < 2:
+            continue
+
+        claimed.update(issue_numbers)
+        proposals.append({
+            "title": (group.get("title") or "").strip() or f"Epic for issues {'/'.join(str(n) for n in issue_numbers)}",
+            "body": (group.get("summary") or "").strip(),
+            "priority": as_priority(group.get("priority")),
+            "status": "pending",
+            "source": source,
+            "issue_numbers": issue_numbers,
+            "rationale": (group.get("rationale") or "").strip(),
+            "execution_notes": (group.get("execution_notes") or "").strip(),
+            "waves": normalize_waves(issue_numbers, group.get("waves")),
+            "started_waves": 0
+        })
+
+append_groups(claude.get("groups"), "claude")
+append_groups(gpt.get("additional_groups"), "gpt-5.4")
+
+ungrouped = sorted(valid - claimed)
+requested = []
+for payload in (claude.get("ungrouped_issue_numbers"), gpt.get("ungrouped_issue_numbers")):
+    if isinstance(payload, list):
+        requested.extend(v for v in payload if isinstance(v, int) and v in valid and v not in claimed)
+
+for num in requested:
+    if num not in ungrouped:
+        ungrouped.append(num)
+
+feedback = gpt.get("feedback")
+if not isinstance(feedback, list):
+    feedback = []
+
+print(json.dumps({
+    "proposals": proposals,
+    "ungrouped_issue_numbers": sorted(set(ungrouped)),
+    "feedback": feedback,
+    "claude_notes": claude.get("notes") or "",
+    "gpt_notes": gpt.get("notes") or ""
+}))
+PY
 }
 
 plan_epic() {
@@ -40,12 +237,9 @@ plan_epic() {
   local claude_response
   claude_response=$(claude -p --model "$CLAUDE_MODEL" "$plan_template")
 
-  # Extract JSON from response (Claude might wrap it in markdown)
   local claude_plan
-  claude_plan=$(echo "$claude_response" | sed -n '/^{/,/^}/p' | head -1)
-  if [ -z "$claude_plan" ]; then
-    claude_plan=$(echo "$claude_response" | jq -c '.' 2>/dev/null || echo "$claude_response")
-  fi
+  claude_plan=$(echo "$claude_response" | extract_json || true)
+  [ -n "$claude_plan" ] || claude_plan='{"issues":[],"notes":""}'
 
   local issue_count
   issue_count=$(echo "$claude_plan" | jq '.issues | length' 2>/dev/null || echo 0)
@@ -65,10 +259,8 @@ plan_epic() {
   gpt_response=$(call_gpt "$critique_template")
 
   local gpt_critique
-  gpt_critique=$(echo "$gpt_response" | sed -n '/^{/,/^}/p' | head -1)
-  if [ -z "$gpt_critique" ]; then
-    gpt_critique=$(echo "$gpt_response" | jq -c '.' 2>/dev/null || echo '{"feedback":[],"additional_issues":[],"notes":""}')
-  fi
+  gpt_critique=$(echo "$gpt_response" | extract_json || true)
+  [ -n "$gpt_critique" ] || gpt_critique='{"feedback":[],"additional_issues":[],"notes":""}'
 
   local additional_count
   additional_count=$(echo "$gpt_critique" | jq '.additional_issues | length' 2>/dev/null || echo 0)
@@ -151,6 +343,107 @@ plan_epic() {
   echo "$epic_id"
 }
 
+group_existing_issues() {
+  local epic_id
+  epic_id=$(date +%s)
+  mkdir -p "$EPICS_DIR"
+
+  local issues_json
+  issues_json=$(existing_group_candidates)
+
+  local issue_count
+  issue_count=$(echo "$issues_json" | jq 'length')
+  if [ "$issue_count" -lt 2 ]; then
+    echo "Need at least 2 eligible open issues to propose epic groupings."
+    return 1
+  fi
+
+  log "${C_TEAL}Grouping $issue_count existing issues into epic proposals"
+  emit "group_start" "Grouping $issue_count existing issues"
+
+  local groups_template
+  groups_template=$(cat "$PROMPTS_DIR/group-existing.md")
+  groups_template="${groups_template//\{\{ISSUES_JSON\}\}/$issues_json}"
+  groups_template="${groups_template//\{\{REPO_CONTEXT\}\}/$(repo_context)}"
+
+  log "${C_CORAL}Claude proposing issue groups..."
+  local claude_response claude_groups
+  claude_response=$(claude -p --model "$CLAUDE_MODEL" "$groups_template")
+  claude_groups=$(echo "$claude_response" | extract_json || true)
+  [ -n "$claude_groups" ] || claude_groups='{"groups":[],"ungrouped_issue_numbers":[],"notes":""}'
+
+  local claude_count
+  claude_count=$(echo "$claude_groups" | jq '.groups | length' 2>/dev/null || echo 0)
+  emit "group_claude" "Claude proposed $claude_count epic groups"
+
+  local critique_template
+  critique_template=$(cat "$PROMPTS_DIR/group-existing-critique.md")
+  critique_template="${critique_template//\{\{ISSUES_JSON\}\}/$issues_json}"
+  local critique_groups
+  critique_groups=$(echo "$claude_groups" | jq -c '{
+    groups: [.groups[]? | {
+      title,
+      priority,
+      issue_numbers,
+      waves,
+      execution_notes
+    }],
+    ungrouped_issue_numbers: (.ungrouped_issue_numbers // []),
+    notes: (.notes // "")
+  }')
+  critique_template="${critique_template//\{\{GROUPS_JSON\}\}/$critique_groups}"
+  critique_template="${critique_template//\{\{REPO_CONTEXT\}\}/$(repo_context)}"
+
+  log "${C_YELLOW}GPT-5.4 reviewing grouping..."
+  local gpt_response gpt_critique
+  gpt_response=$(call_gpt "$critique_template")
+  gpt_critique=$(echo "$gpt_response" | extract_json || true)
+  [ -n "$gpt_critique" ] || gpt_critique='{"feedback":[],"additional_groups":[],"ungrouped_issue_numbers":[],"notes":""}'
+
+  local normalized
+  normalized=$(normalize_existing_group_plan "$issues_json" "$claude_groups" "$gpt_critique")
+
+  local epic_file="$EPICS_DIR/$epic_id.json"
+  jq -nc \
+    --arg id "$epic_id" \
+    --arg title "Existing issue grouping $(date +%Y-%m-%d)" \
+    --arg kind "existing-issues" \
+    --arg status "planning" \
+    --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --argjson proposals "$(echo "$normalized" | jq '.proposals')" \
+    --argjson feedback "$(echo "$normalized" | jq '.feedback')" \
+    --argjson ungrouped "$(echo "$normalized" | jq '.ungrouped_issue_numbers')" \
+    --arg claude_notes "$(echo "$normalized" | jq -r '.claude_notes')" \
+    --arg gpt_notes "$(echo "$normalized" | jq -r '.gpt_notes')" \
+    '{
+      id: $id,
+      title: $title,
+      kind: $kind,
+      status: $status,
+      created_at: $created,
+      proposals: $proposals,
+      feedback: $feedback,
+      ungrouped_issue_numbers: $ungrouped,
+      claude_notes: $claude_notes,
+      gpt_notes: $gpt_notes
+    }' > "$epic_file"
+
+  local total
+  total=$(echo "$normalized" | jq '.proposals | length')
+  local ungrouped_count
+  ungrouped_count=$(echo "$normalized" | jq '.ungrouped_issue_numbers | length')
+  emit "group_done" "Proposed $total epic groups from existing issues"
+
+  printf "\n  ${C_BOLD}Existing issue grouping${C_RESET}\n"
+  printf "  ${C_DIM}ID: $epic_id${C_RESET}\n\n"
+  echo "$normalized" | jq -r '.proposals[] | "  [\(.source)] \(.title) — \(.issue_numbers | map("#" + tostring) | join(", "))"'
+  printf "\n  ${C_DIM}%s ungrouped issues remain${C_RESET}\n" "$ungrouped_count"
+  printf "  Approve groups in the dashboard: ${C_TEAL}http://localhost:${DASHBOARD_PORT:-4242}${C_RESET}\n"
+  printf "  Or: ${C_DIM}agentify approve $epic_id${C_RESET}\n\n"
+
+  echo "$epic_id"
+}
+
 approve_issue() {
   local epic_id="$1" index="$2"
   local epic_file="$EPICS_DIR/$epic_id.json"
@@ -164,10 +457,34 @@ approve_issue() {
   local status=$(echo "$proposal" | jq -r '.status')
   [ "$status" != "pending" ] && { echo "Issue already $status"; return 1; }
 
+  local epic_kind
+  epic_kind=$(jq -r '.kind // "planned-issues"' "$epic_file")
+
+  if [ "$epic_kind" = "existing-issues" ]; then
+    local title wave_numbers
+    title=$(echo "$proposal" | jq -r '.title')
+    wave_numbers=$(echo "$proposal" | jq -r '.waves[0][]?')
+    [ -n "$wave_numbers" ] || { echo "Proposal has no execution wave"; return 1; }
+
+    for num in $wave_numbers; do
+      gh issue edit "$num" --add-label "agent" 2>/dev/null
+    done
+
+    local tmp=$(mktemp)
+    jq --argjson i "$index" '
+      .proposals[$i].status = "approved" |
+      .proposals[$i].started_waves = 1 |
+      .status = "active"
+    ' "$epic_file" > "$tmp" && mv "$tmp" "$epic_file"
+
+    log "${C_GREEN}Approved existing issue group: $title"
+    emit "group_approved" "Approved existing issue group: $title"
+    return 0
+  fi
+
   local title=$(echo "$proposal" | jq -r '.title')
   local body=$(echo "$proposal" | jq -r '.body')
 
-  # Create GitHub issue
   local issue_url
   issue_url=$(gh issue create \
     --title "$title" \
@@ -179,7 +496,6 @@ approve_issue() {
 
   local issue_num=$(echo "$issue_url" | grep -oE '[0-9]+$')
 
-  # Update epic file
   local tmp=$(mktemp)
   jq --argjson i "$index" --arg num "$issue_num" \
     '.proposals[$i].status = "approved" | .proposals[$i].issue_number = ($num | tonumber)' \
@@ -230,12 +546,114 @@ approve_all() {
   log "${C_GREEN}All $count issues approved and created"
 }
 
+advance_existing_issue_epics() {
+  for epic_file in "$EPICS_DIR"/*.json; do
+    [ -f "$epic_file" ] || continue
+
+    local epic_kind
+    epic_kind=$(jq -r '.kind // ""' "$epic_file")
+    [ "$epic_kind" = "existing-issues" ] || continue
+
+    local changed=0
+    local proposals_len
+    proposals_len=$(jq '.proposals | length' "$epic_file")
+
+    for ((i=0; i<proposals_len; i++)); do
+      local proposal_status
+      proposal_status=$(jq -r ".proposals[$i].status" "$epic_file")
+      [ "$proposal_status" = "approved" ] || continue
+
+      local started total_waves
+      started=$(jq -r ".proposals[$i].started_waves // 0" "$epic_file")
+      total_waves=$(jq -r ".proposals[$i].waves | length" "$epic_file")
+      [ "$started" -gt 0 ] || continue
+
+      local current_wave_done=true
+      local current_wave_numbers
+      current_wave_numbers=$(jq -r ".proposals[$i].waves[$((started - 1))][]?" "$epic_file")
+
+      for num in $current_wave_numbers; do
+        local state
+        state=$(gh issue view "$num" --json state -q '.state' 2>/dev/null)
+        if [ "$state" != "CLOSED" ]; then
+          current_wave_done=false
+          break
+        fi
+      done
+
+      [ "$current_wave_done" = true ] || continue
+
+      if [ "$started" -lt "$total_waves" ]; then
+        local next_wave_numbers
+        next_wave_numbers=$(jq -r ".proposals[$i].waves[$started][]?" "$epic_file")
+        for num in $next_wave_numbers; do
+          gh issue edit "$num" --add-label "agent" 2>/dev/null
+        done
+
+        local tmp=$(mktemp)
+        jq --argjson i "$i" '
+          .proposals[$i].started_waves = ((.proposals[$i].started_waves // 0) + 1)
+        ' "$epic_file" > "$tmp" && mv "$tmp" "$epic_file"
+        changed=1
+
+        local title
+        title=$(jq -r ".proposals[$i].title" "$epic_file")
+        emit "group_wave_started" "Started next wave for existing issue group: $title"
+      else
+        local all_closed=true
+        local issue_nums
+        issue_nums=$(jq -r ".proposals[$i].issue_numbers[]?" "$epic_file")
+        for num in $issue_nums; do
+          local state
+          state=$(gh issue view "$num" --json state -q '.state' 2>/dev/null)
+          if [ "$state" != "CLOSED" ]; then
+            all_closed=false
+            break
+          fi
+        done
+
+        if [ "$all_closed" = true ]; then
+          local tmp=$(mktemp)
+          jq --argjson i "$i" '.proposals[$i].status = "complete"' "$epic_file" > "$tmp" && mv "$tmp" "$epic_file"
+          changed=1
+
+          local title
+          title=$(jq -r ".proposals[$i].title" "$epic_file")
+          emit "group_complete" "Existing issue group complete: $title"
+        fi
+      fi
+    done
+
+    if [ "$changed" -eq 1 ]; then
+      local pending approved complete
+      pending=$(jq '[.proposals[] | select(.status == "pending")] | length' "$epic_file")
+      approved=$(jq '[.proposals[] | select(.status == "approved")] | length' "$epic_file")
+      complete=$(jq '[.proposals[] | select(.status == "complete")] | length' "$epic_file")
+
+      local tmp=$(mktemp)
+      if [ "$pending" -eq 0 ] && [ "$approved" -eq 0 ] && [ "$complete" -gt 0 ]; then
+        jq '.status = "complete"' "$epic_file" > "$tmp" && mv "$tmp" "$epic_file"
+      elif [ "$approved" -gt 0 ] || [ "$complete" -gt 0 ]; then
+        jq '.status = "active"' "$epic_file" > "$tmp" && mv "$tmp" "$epic_file"
+      else
+        rm -f "$tmp"
+      fi
+    fi
+  done
+}
+
 check_epic_completion() {
+  advance_existing_issue_epics
+
   for epic_file in "$EPICS_DIR"/*.json; do
     [ -f "$epic_file" ] || continue
 
     local status=$(jq -r '.status' "$epic_file")
     [ "$status" != "active" ] && continue
+
+    local epic_kind
+    epic_kind=$(jq -r '.kind // "planned-issues"' "$epic_file")
+    [ "$epic_kind" = "existing-issues" ] && continue
 
     # Check if all approved issues are closed
     local all_done=true

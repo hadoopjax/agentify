@@ -34,6 +34,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if self.path == "/plan":
             self._handle_plan(body)
+        elif self.path == "/group-existing":
+            self._handle_group_existing()
         elif self.path == "/approve":
             self._handle_approve(body)
         elif self.path == "/reject":
@@ -119,6 +121,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         pass
         self._json_response({"epics": epics})
 
+    def _reserved_existing_issue_numbers(self):
+        reserved = set()
+        epics_dir = os.path.join(DATA_DIR, "epics")
+        if not os.path.isdir(epics_dir):
+            return reserved
+
+        for fname in os.listdir(epics_dir):
+            if not fname.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(epics_dir, fname)) as f:
+                    epic = json.load(f)
+            except (json.JSONDecodeError, FileNotFoundError):
+                continue
+
+            if epic.get("kind") != "existing-issues":
+                continue
+
+            for proposal in epic.get("proposals", []):
+                if proposal.get("status") in {"rejected", "complete"}:
+                    continue
+                for num in proposal.get("issue_numbers", []):
+                    if isinstance(num, int):
+                        reserved.add(num)
+
+        return reserved
+
     def _handle_plan(self, body):
         description = body.get("description", "")
         if not description:
@@ -157,6 +186,36 @@ echo "$epic_id"
         except Exception as e:
             self._json_response({"error": str(e)}, 500)
 
+    def _handle_group_existing(self):
+        script = f"""
+source "{os.path.join(os.path.dirname(os.path.abspath(__file__)), 'loop.sh')}"
+source "{os.path.join(os.path.dirname(os.path.abspath(__file__)), 'planner.sh')}"
+AGENTIFY_DIR="{DATA_DIR}"
+EVENTS_FILE="{DATA_DIR}/events.jsonl"
+STATE_FILE="{DATA_DIR}/state.json"
+epic_id=$(group_existing_issues)
+echo "$epic_id"
+"""
+        try:
+            result = subprocess.run(
+                ["bash", "-c", script],
+                capture_output=True, text=True, timeout=180,
+                env={**os.environ, "AGENTIFY_DIR": DATA_DIR}
+            )
+            epic_id = result.stdout.strip().split("\n")[-1]
+
+            epic_file = os.path.join(DATA_DIR, "epics", f"{epic_id}.json")
+            if os.path.exists(epic_file):
+                with open(epic_file) as f:
+                    epic = json.load(f)
+                self._json_response({"epic": epic})
+            else:
+                self._json_response({"error": "Grouping failed", "stderr": result.stderr}, 500)
+        except subprocess.TimeoutExpired:
+            self._json_response({"error": "Grouping timed out"}, 504)
+        except Exception as e:
+            self._json_response({"error": str(e)}, 500)
+
     def _handle_approve(self, body):
         epic_id = body.get("epic_id", "")
         index = body.get("index", 0)
@@ -173,6 +232,32 @@ echo "$epic_id"
             proposal = epic["proposals"][index]
             if proposal["status"] != "pending":
                 self._json_response({"error": f"Already {proposal['status']}"}, 400)
+                return
+
+            if epic.get("kind") == "existing-issues":
+                waves = proposal.get("waves") or []
+                first_wave = waves[0] if waves else []
+                if not first_wave:
+                    self._json_response({"error": "Proposal has no execution wave"}, 500)
+                    return
+
+                for num in first_wave:
+                    result = subprocess.run(
+                        ["gh", "issue", "edit", str(num), "--add-label", "agent"],
+                        capture_output=True, text=True, timeout=30
+                    )
+                    if result.returncode != 0:
+                        self._json_response({"error": result.stderr}, 500)
+                        return
+
+                epic["proposals"][index]["status"] = "approved"
+                epic["proposals"][index]["started_waves"] = 1
+                epic["status"] = "active"
+
+                with open(epic_file, "w") as f:
+                    json.dump(epic, f)
+
+                self._json_response({"issue_numbers": first_wave})
                 return
 
             # Create GitHub issue
@@ -249,6 +334,28 @@ echo "$epic_id"
                 if p["status"] != "pending":
                     continue
 
+                if epic.get("kind") == "existing-issues":
+                    waves = p.get("waves") or []
+                    first_wave = waves[0] if waves else []
+                    if not first_wave:
+                        continue
+
+                    ok = True
+                    for num in first_wave:
+                        result = subprocess.run(
+                            ["gh", "issue", "edit", str(num), "--add-label", "agent"],
+                            capture_output=True, text=True, timeout=30
+                        )
+                        if result.returncode != 0:
+                            ok = False
+                            break
+
+                    if ok:
+                        epic["proposals"][i]["status"] = "approved"
+                        epic["proposals"][i]["started_waves"] = 1
+                        results.append({"index": i, "issue_numbers": first_wave})
+                    continue
+
                 result = subprocess.run(
                     ["gh", "issue", "create",
                      "--title", p["title"],
@@ -286,10 +393,11 @@ echo "$epic_id"
 
             all_issues = json.loads(result.stdout) if result.stdout.strip() else []
             skip_labels = {"agent", "agent-wip", "agent-skip"}
+            reserved = self._reserved_existing_issue_numbers()
             untriaged = []
             for issue in all_issues:
                 issue_labels = {l["name"] for l in issue.get("labels", [])}
-                if not issue_labels & skip_labels:
+                if not issue_labels & skip_labels and issue["number"] not in reserved:
                     untriaged.append({
                         "number": issue["number"],
                         "title": issue["title"],
@@ -309,6 +417,9 @@ echo "$epic_id"
         num = body.get("number")
         if not num:
             self._json_response({"error": "No issue number"}, 400)
+            return
+        if num in self._reserved_existing_issue_numbers():
+            self._json_response({"error": "Issue is already reserved by an epic grouping"}, 409)
             return
         try:
             result = subprocess.run(

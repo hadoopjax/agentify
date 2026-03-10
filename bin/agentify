@@ -64,6 +64,7 @@ Usage: agentify <command> [options]
 Commands:
   run          Start the agent loop (from inside a git repo)
   plan "desc"  Plan an epic (Claude + GPT-5.4 dialectic)
+  group        Group existing issues into epic proposals
   approve ID   Approve all proposed issues for an epic
   triage       Review existing issues and assign to agent or skip
   init         Create agent/agent-wip/agent-skip labels
@@ -241,7 +242,7 @@ CLAUDE_MODEL="claude-opus-4-6"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    run|init|test|dashboard|status|plan|approve|triage) COMMAND="$1"; shift ;;
+    run|init|test|dashboard|status|plan|group|approve|triage) COMMAND="$1"; shift ;;
     --max-runs)      shift; MAX_RUNS="$1"; shift ;;
     --poll)          shift; POLL_INTERVAL="$1"; shift ;;
     --port)          shift; DASHBOARD_PORT="$1"; shift ;;
@@ -261,6 +262,8 @@ export MAX_RUNS POLL_INTERVAL MAX_CONCURRENT CODEX_MODEL CODEX_EFFORT CLAUDE_MOD
 
 cmd_plan() {
   require_repo
+  require_tools
+  require_gh_auth
   local desc="${1:-}"
   if [ -z "$desc" ]; then
     echo "Usage: agentify plan \"description of the feature\""
@@ -274,6 +277,20 @@ cmd_plan() {
   source "$LIB_DIR/loop.sh"
   source "$LIB_DIR/planner.sh"
   plan_epic "$desc"
+}
+
+cmd_group() {
+  require_repo
+  require_tools
+  require_gh_auth
+
+  mkdir -p .agentify
+  [ -f .agentify/state.json ] || echo '{}' > .agentify/state.json
+  [ -f .agentify/events.jsonl ] || touch .agentify/events.jsonl
+
+  source "$LIB_DIR/loop.sh"
+  source "$LIB_DIR/planner.sh"
+  group_existing_issues
 }
 
 cmd_approve() {
@@ -305,15 +322,13 @@ cmd_approve() {
 
 cmd_triage() {
   require_repo
-  echo "Fetching open issues..."
-  local issues
-  issues=$(gh issue list --state open --limit 50 --json number,title,labels)
+  require_gh_auth
+  source "$LIB_DIR/loop.sh"
+  source "$LIB_DIR/planner.sh"
 
-  # Filter to issues without agent/agent-wip/agent-skip labels
+  echo "Fetching open issues..."
   local untriaged
-  untriaged=$(echo "$issues" | jq -c '[.[] | select(
-    [.labels[].name] | (contains(["agent"]) or contains(["agent-wip"]) or contains(["agent-skip"])) | not
-  )]')
+  untriaged=$(existing_group_candidates | jq -c '[.[] | {number, title}]')
 
   local count=$(echo "$untriaged" | jq 'length')
   if [ "$count" -eq 0 ]; then
@@ -340,6 +355,7 @@ esac
 case "$COMMAND" in
   run)       cmd_run ;;
   plan)      cmd_plan "$POSITIONAL" ;;
+  group)     cmd_group ;;
   approve)   cmd_approve "$POSITIONAL" ;;
   triage)    cmd_triage ;;
   init)      cmd_init ;;

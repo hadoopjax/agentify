@@ -4,6 +4,7 @@ Describe a feature. Claude and GPT-5.4 plan the issues. Codex codes them in para
 
 ```
 agentify plan "Add OAuth login with Google and GitHub"
+agentify group
 agentify approve <epic-id>
 agentify run
 ```
@@ -44,6 +45,15 @@ Point agentify at a repo with existing issues:
 3. **Assign** adds the `agent` label — the loop will pick it up
 4. **Skip** adds `agent-skip` — hides it from future triage
 5. Issues already labeled `agent`, `agent-wip`, or `agent-skip` are excluded
+
+### Group Existing Issues
+
+1. `agentify group` asks Claude to cluster eligible open issues into epic proposals
+2. GPT-5.4 critiques the grouping for overlap, missing groups, and unsafe sequencing
+3. agentify stores the approved-local proposal in `.agentify/epics/*.json`
+4. Existing issues in a grouped proposal are reserved locally so triage will not assign them twice
+5. Approving a grouped epic starts only its first execution wave by labeling those issues `agent`
+6. Later waves unlock automatically after the prior wave closes
 
 ### Execution
 
@@ -109,6 +119,7 @@ Dashboard at `http://localhost:4242`. With Tailscale, accessible from any device
 ```
 agentify run              Start the loop + dashboard
 agentify plan "desc"      Plan an epic (Claude + GPT-5.4 dialectic)
+agentify group            Group existing issues into epic proposals
 agentify approve <id>     Approve all pending issues for an epic
 agentify triage           Review existing issues — assign or skip
 agentify init             Create agent/agent-wip/agent-skip labels

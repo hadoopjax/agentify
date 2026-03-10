@@ -119,6 +119,10 @@
     margin-bottom: 36px;
     transition: border-color 0.2s, box-shadow 0.2s;
   }
+  .plan-actions {
+    display: flex;
+    gap: 8px;
+  }
   .plan-bar:focus-within {
     border-color: var(--teal);
     box-shadow: 0 0 0 3px rgba(43,181,166,0.1), var(--shadow);
@@ -282,6 +286,20 @@
   }
   .proposal-src-claude { color: var(--coral); }
   .proposal-src-gpt { color: var(--violet); }
+  .proposal-body {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-top: 4px;
+    line-height: 1.5;
+  }
+  .proposal-meta {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-top: 6px;
+  }
 
   .proposal-btns { display: flex; gap: 6px; flex-shrink: 0; }
 
@@ -516,7 +534,10 @@
 
   <div class="plan-bar">
     <input type="text" id="plan-input" placeholder="Describe a feature to plan...">
-    <button class="btn btn-primary" id="plan-btn">Plan</button>
+    <div class="plan-actions">
+      <button class="btn btn-ghost" id="group-btn">Group Existing</button>
+      <button class="btn btn-primary" id="plan-btn">Plan</button>
+    </div>
   </div>
 
   <div id="triage-section" class="section" style="display:none">
@@ -575,6 +596,7 @@ let evCount = 0, t0 = Date.now();
 let prevWorkerKeys = new Set();
 let prevEpicData = '';
 let planning = false;
+let grouping = false;
 
 const phaseLabel = {
   idle:'Idle', starting:'Starting', coding:'Coding',
@@ -596,7 +618,10 @@ const evColor = {
   error:'var(--coral)', idle:'var(--sand)', retry:'var(--sand)',
   loop_end:'var(--teal)', plan_start:'var(--violet)', plan_done:'var(--violet)',
   plan_claude:'var(--coral)', plan_gpt:'var(--sand)',
-  epic_complete:'var(--teal)', issue_approved:'var(--teal)'
+  epic_complete:'var(--teal)', issue_approved:'var(--teal)',
+  group_start:'var(--violet)', group_done:'var(--violet)',
+  group_claude:'var(--coral)', group_approved:'var(--teal)',
+  group_wave_started:'var(--sand)', group_complete:'var(--teal)'
 };
 
 // -- Utilities --
@@ -651,6 +676,33 @@ async function submitPlan() {
 
 $('plan-btn').addEventListener('click', submitPlan);
 $('plan-input').addEventListener('keydown', e => { if (e.key === 'Enter') submitPlan(); });
+
+async function submitExistingGrouping() {
+  const btn = $('group-btn');
+  if (grouping) return;
+
+  grouping = true;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>';
+
+  try {
+    const res = await fetch('/group-existing', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    });
+    const data = await res.json();
+    if (data.error) alert('Grouping failed: ' + data.error);
+    else fetchEpics();
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+
+  grouping = false;
+  btn.disabled = false;
+  btn.textContent = 'Group Existing';
+}
+
+$('group-btn').addEventListener('click', submitExistingGrouping);
 
 // -- Triage --
 let prevTriageData = '';
@@ -795,7 +847,7 @@ function renderEpics(epics) {
     const card = document.createElement('div');
     card.className = 'card epic-card';
 
-    const approved = epic.proposals.filter(p => p.status === 'approved');
+    const approved = epic.proposals.filter(p => p.status === 'approved' || p.status === 'complete');
     const active = epic.proposals.filter(p => p.status !== 'rejected');
     const pending = epic.proposals.filter(p => p.status === 'pending');
     const pct = active.length > 0 ? (approved.length / active.length * 100) : 0;
@@ -823,13 +875,30 @@ function renderEpics(epics) {
         + '</div>';
     }
 
+    if (epic.feedback && epic.feedback.length > 0) {
+      const comments = epic.feedback.slice(0, 3).map(f => esc(f.comment || '')).filter(Boolean);
+      if (comments.length > 0) {
+        html += '<div class="epic-notes"><strong>Review notes:</strong> ' + comments.join('<br>') + '</div>';
+      }
+    }
+
+    if (epic.ungrouped_issue_numbers && epic.ungrouped_issue_numbers.length > 0) {
+      html += '<div class="epic-notes"><strong>Ungrouped:</strong> '
+        + esc(epic.ungrouped_issue_numbers.map(n => '#' + n).join(', '))
+        + '</div>';
+    }
+
     html += '<div class="proposals">';
     epic.proposals.forEach((p, i) => {
       const srcClass = p.source === 'claude' ? 'proposal-src-claude' : 'proposal-src-gpt';
+      const issueNums = (p.issue_numbers || []).map(n => '#' + n).join(', ');
+      const waves = (p.waves || []).map((wave, idx) => 'W' + (idx + 1) + ': ' + wave.map(n => '#' + n).join(', ')).join('  ');
       html += '<div class="proposal-row">'
         + '<div class="proposal-info">'
         + '<div class="proposal-title">' + esc(p.title) + '</div>'
         + '<div class="proposal-src ' + srcClass + '">' + esc(p.source) + '</div>'
+        + (issueNums ? '<div class="proposal-meta"><span>' + esc(issueNums) + '</span>' + (waves ? '<span>' + esc(waves) + '</span>' : '') + '</div>' : '')
+        + (p.execution_notes ? '<div class="proposal-body">' + esc(p.execution_notes) + '</div>' : '')
         + '</div>';
 
       if (p.status === 'pending') {
@@ -838,7 +907,17 @@ function renderEpics(epics) {
           + '<button class="btn btn-danger btn-sm" onclick="rejectIssue(\'' + epic.id + '\',' + i + ')">Reject</button>'
           + '</div>';
       } else if (p.status === 'approved') {
-        html += '<span class="proposal-done">#' + (p.issue_number || '') + '</span>';
+        if (p.issue_number) {
+          html += '<span class="proposal-done">#' + p.issue_number + '</span>';
+        } else if (p.issue_numbers) {
+          const started = p.started_waves || 0;
+          const total = (p.waves || []).length || 0;
+          html += '<span class="proposal-done">' + started + '/' + total + ' waves</span>';
+        } else {
+          html += '<span class="proposal-done">approved</span>';
+        }
+      } else if (p.status === 'complete') {
+        html += '<span class="proposal-done">complete</span>';
       } else {
         html += '<span class="proposal-skip">skipped</span>';
       }
