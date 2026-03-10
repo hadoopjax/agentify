@@ -51,7 +51,13 @@ append_env_var() {
   if [ -f "$source_file" ]; then
     line=$(grep -E "^${key}=" "$source_file" | tail -n 1 || true)
     if [ -n "$line" ]; then
-      printf '%s\n' "$line" >> "$ENV_FILE"
+      local value="${line#*=}"
+      if [[ "$value" == \"*\" && "$value" == *\" ]]; then
+        value="${value:1:${#value}-2}"
+      elif [[ "$value" == \'*\' && "$value" == *\' ]]; then
+        value="${value:1:${#value}-2}"
+      fi
+      printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
       return 0
     fi
   fi
