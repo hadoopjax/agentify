@@ -4,12 +4,50 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LIB_DIR="$SCRIPT_DIR/../lib"
 
-# Load .env (repo-local, then home)
+load_env_file() {
+  local env_file="$1"
+  if [ ! -f "$env_file" ]; then
+    return 0
+  fi
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    case "$line" in
+      ''|\#*)
+        continue
+        ;;
+    esac
+
+    if [[ "$line" == export[[:space:]]* ]]; then
+      line="${line#export }"
+    fi
+
+    if [[ "$line" != *=* ]]; then
+      continue
+    fi
+
+    local key="${line%%=*}"
+    local value="${line#*=}"
+
+    if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      continue
+    fi
+
+    if [[ "$value" == \"*\" && "$value" == *\" ]]; then
+      value="${value:1:${#value}-2}"
+    elif [[ "$value" == \'*\' && "$value" == *\' ]]; then
+      value="${value:1:${#value}-2}"
+    fi
+
+    printf -v "$key" '%s' "$value"
+    export "$key"
+  done < "$env_file"
+}
+
+# Load .env (repo-local, then home) without shell-expanding values.
 for envfile in .env "$HOME/.agentify.env"; do
   if [ -f "$envfile" ]; then
-    set -a
-    . "$envfile"
-    set +a
+    load_env_file "$envfile"
     break
   fi
 done
@@ -76,6 +114,13 @@ require_tools() {
   done
   if [ ${#missing[@]} -gt 0 ]; then
     echo "Missing: ${missing[*]}"
+    exit 1
+  fi
+}
+
+require_gh_auth() {
+  if ! gh auth status > /dev/null 2>&1; then
+    echo "GitHub CLI auth is invalid. Re-authenticate with: gh auth login -h github.com"
     exit 1
   fi
 }
@@ -159,6 +204,7 @@ cmd_dashboard() {
 cmd_run() {
   require_repo
   require_tools
+  require_gh_auth
 
   # Start dashboard
   if [ "$NO_DASHBOARD" != "true" ]; then

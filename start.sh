@@ -5,14 +5,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 IMAGE="agentify"
 PORT="${DASHBOARD_PORT:-4242}"
 COLIMA_LOG="${HOME}/.colima/_lima/colima/ha.stderr.log"
+CONTAINER_CMD=(colima nerdctl --)
+ENV_FILE=""
+RUN_ARGS=()
 
-ensure_docker_runtime() {
-  if command -v docker > /dev/null 2>&1 && docker info > /dev/null 2>&1; then
-    return 0
-  fi
-
+ensure_colima_runtime() {
   if ! command -v colima > /dev/null 2>&1; then
-    echo "No container runtime found. Install Docker or Colima."
+    echo "Colima is required. Install it with: brew install colima"
     exit 1
   fi
 
@@ -28,14 +27,36 @@ ensure_docker_runtime() {
     echo "Try: colima stop --force && colima start"
     exit 1
   fi
-
-  if ! command -v docker > /dev/null 2>&1 || ! docker info > /dev/null 2>&1; then
-    echo "Docker is still unavailable after starting Colima."
-    exit 1
-  fi
 }
 
-ensure_docker_runtime
+ensure_colima_runtime
+
+cleanup() {
+  [ -n "${ENV_FILE:-}" ] && [ -f "$ENV_FILE" ] && rm -f "$ENV_FILE"
+}
+
+trap cleanup EXIT
+
+append_env_var() {
+  local key="$1"
+  local source_file="$2"
+  local line=""
+
+  if [ -n "${!key:-}" ]; then
+    printf '%s=%s\n' "$key" "${!key}" >> "$ENV_FILE"
+    return 0
+  fi
+
+  if [ -f "$source_file" ]; then
+    line=$(grep -E "^${key}=" "$source_file" | tail -n 1 || true)
+    if [ -n "$line" ]; then
+      printf '%s\n' "$line" >> "$ENV_FILE"
+      return 0
+    fi
+  fi
+
+  return 1
+}
 
 # First arg is the repo path, rest are agentify flags
 REPO="${1:-.}"
@@ -43,39 +64,43 @@ shift 2>/dev/null || true
 
 REPO="$(cd "$REPO" && pwd)"
 
-if ! git -C "$REPO" rev-parse --git-dir > /dev/null 2>&1; then
+if ! GIT_CONFIG_GLOBAL=/dev/null git -C "$REPO" rev-parse --git-dir > /dev/null 2>&1; then
   echo "Not a git repo: $REPO"
   echo "Usage: ./start.sh /path/to/repo [--concurrency 5 ...]"
   exit 1
 fi
 
-# Check for .env in repo or agentify dir
-ENV_FILE=""
-if [ -f "$REPO/.env" ]; then
-  ENV_FILE="$REPO/.env"
-elif [ -f "$SCRIPT_DIR/.env" ]; then
-  ENV_FILE="$SCRIPT_DIR/.env"
-else
-  echo "No .env found in $REPO or $SCRIPT_DIR"
-  echo "Create one with:"
-  echo "  OPENAI_API_KEY=sk-..."
-  echo "  ANTHROPIC_API_KEY=sk-ant-..."
+# Build a dedicated env file for the agent container.
+mkdir -p "$REPO/.agentify"
+ENV_FILE="$(mktemp "$REPO/.agentify/agentify-env.XXXXXX")"
+if ! append_env_var OPENAI_API_KEY "$REPO/.env" && ! append_env_var OPENAI_API_KEY "$SCRIPT_DIR/.env"; then
+  echo "Missing OPENAI_API_KEY in the shell environment, $REPO/.env, or $SCRIPT_DIR/.env"
+  exit 1
+fi
+if ! append_env_var ANTHROPIC_API_KEY "$REPO/.env" && ! append_env_var ANTHROPIC_API_KEY "$SCRIPT_DIR/.env"; then
+  echo "Missing ANTHROPIC_API_KEY in the shell environment, $REPO/.env, or $SCRIPT_DIR/.env"
   exit 1
 fi
 
 # Build if image doesn't exist
-if ! docker image inspect "$IMAGE" > /dev/null 2>&1; then
+if ! "${CONTAINER_CMD[@]}" image inspect "$IMAGE" > /dev/null 2>&1; then
   echo "Building agentify image..."
-  docker build -t "$IMAGE" "$SCRIPT_DIR"
+  "${CONTAINER_CMD[@]}" build -t "$IMAGE" "$SCRIPT_DIR"
 fi
 
 echo "Starting agentify on $(basename "$REPO")..."
 
-docker run --rm -it \
-  -v "$REPO":/repo \
-  -v ~/.config/gh:/root/.config/gh:ro \
-  -v ~/.gitconfig:/root/.gitconfig:ro \
-  --env-file "$ENV_FILE" \
-  -p "$PORT":"$PORT" \
-  -e DASHBOARD_PORT="$PORT" \
-  "$IMAGE" run "$@"
+RUN_ARGS=(
+  run --rm -it
+  -v "$REPO":/repo
+  -v ~/.config/gh:/root/.config/gh:ro
+  --env-file "$ENV_FILE"
+  -p "$PORT":"$PORT"
+  -e DASHBOARD_PORT="$PORT"
+)
+
+if [ -f "$HOME/.gitconfig" ]; then
+  RUN_ARGS+=(-v "$HOME/.gitconfig:/root/.gitconfig:ro")
+fi
+
+"${CONTAINER_CMD[@]}" "${RUN_ARGS[@]}" "$IMAGE" run "$@"
