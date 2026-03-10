@@ -4,17 +4,38 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 IMAGE="agentify"
 PORT="${DASHBOARD_PORT:-4242}"
+COLIMA_LOG="${HOME}/.colima/_lima/colima/ha.stderr.log"
 
-# Ensure Colima is running
-if command -v colima > /dev/null 2>&1; then
-  if ! colima status > /dev/null 2>&1; then
-    echo "Starting Colima..."
-    colima start
+ensure_docker_runtime() {
+  if command -v docker > /dev/null 2>&1 && docker info > /dev/null 2>&1; then
+    return 0
   fi
-elif ! docker info > /dev/null 2>&1; then
-  echo "No container runtime found. Install Colima: brew install colima"
-  exit 1
-fi
+
+  if ! command -v colima > /dev/null 2>&1; then
+    echo "No container runtime found. Install Docker or Colima."
+    exit 1
+  fi
+
+  echo "Starting Colima..."
+  if ! colima start; then
+    echo "Colima failed to start."
+    if [ -f "$COLIMA_LOG" ]; then
+      echo ""
+      echo "Recent Colima log:"
+      tail -n 20 "$COLIMA_LOG"
+    fi
+    echo ""
+    echo "Try: colima stop --force && colima start"
+    exit 1
+  fi
+
+  if ! command -v docker > /dev/null 2>&1 || ! docker info > /dev/null 2>&1; then
+    echo "Docker is still unavailable after starting Colima."
+    exit 1
+  fi
+}
+
+ensure_docker_runtime
 
 # First arg is the repo path, rest are agentify flags
 REPO="${1:-.}"
