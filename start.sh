@@ -5,6 +5,17 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 IMAGE="agentify"
 PORT="${DASHBOARD_PORT:-4242}"
 
+# Ensure Colima is running
+if command -v colima > /dev/null 2>&1; then
+  if ! colima status > /dev/null 2>&1; then
+    echo "Starting Colima..."
+    colima start
+  fi
+elif ! docker info > /dev/null 2>&1; then
+  echo "No container runtime found. Install Colima: brew install colima"
+  exit 1
+fi
+
 # First arg is the repo path, rest are agentify flags
 REPO="${1:-.}"
 shift 2>/dev/null || true
