@@ -1,0 +1,255 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+LIB_DIR="$SCRIPT_DIR/../lib"
+
+# Colors
+C_RESET="\033[0m"
+C_DIM="\033[2m"
+C_BOLD="\033[1m"
+C_TEAL="\033[38;5;43m"
+
+DASHBOARD_PORT="${DASHBOARD_PORT:-4242}"
+DASHBOARD_PID=""
+
+usage() {
+  cat <<EOF
+Usage: agentify <command> [options]
+
+Commands:
+  run          Start the agent loop (from inside a git repo)
+  plan "desc"  Plan an epic — Claude + GPT-5.4 break it into issues
+  approve ID   Approve all proposed issues for an epic
+  init         Create the 'agent' + 'agent-wip' labels
+  test         Create a test issue to trigger the loop
+  dashboard    Open just the dashboard
+  status       Show current state + recent activity
+
+Options:
+  --max-runs N         Stop after N completed runs (0 = unlimited)
+  --poll N             Seconds between idle checks (default: 60)
+  --port N             Dashboard port (default: 4242)
+  --codex-model M      Codex model (default: gpt-5.4)
+  --codex-effort L     Reasoning effort: low, medium, high (default: high)
+  --claude-model M     Claude model (default: claude-opus-4-6)
+  --concurrency N      Parallel workers (default: 3)
+  --no-dashboard       Don't start the dashboard
+EOF
+  exit 1
+}
+
+cleanup() {
+  printf "\n  ${C_DIM}stopping workers...${C_RESET}\n"
+  # Kill all worker processes
+  for pidfile in .agentify/workers/*.pid 2>/dev/null; do
+    [ -f "$pidfile" ] || continue
+    kill "$(cat "$pidfile")" 2>/dev/null
+  done
+  [ -n "$DASHBOARD_PID" ] && kill "$DASHBOARD_PID" 2>/dev/null
+  printf "  ${C_DIM}agentify stopped${C_RESET}\n\n"
+  exit 0
+}
+
+require_repo() {
+  if ! git rev-parse --git-dir > /dev/null 2>&1; then
+    echo "Not in a git repo. cd into one first."
+    exit 1
+  fi
+}
+
+require_tools() {
+  local missing=()
+  for cmd in gh codex claude jq; do
+    command -v "$cmd" > /dev/null 2>&1 || missing+=("$cmd")
+  done
+  if [ ${#missing[@]} -gt 0 ]; then
+    echo "Missing: ${missing[*]}"
+    exit 1
+  fi
+}
+
+cmd_init() {
+  require_repo
+  local repo
+  repo=$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>/dev/null)
+  echo "Setting up agentify for $repo..."
+
+  if gh label list 2>/dev/null | grep -q "^agent	"; then
+    echo "  Label 'agent' already exists"
+  else
+    gh label create agent --description "Agent loop will pick this up" --color "7C3AED"
+    echo "  Label 'agent' created"
+  fi
+
+  if gh label list 2>/dev/null | grep -q "agent-wip"; then
+    echo "  Label 'agent-wip' already exists"
+  else
+    gh label create agent-wip --description "Agent is working on this" --color "D4C5F9"
+    echo "  Label 'agent-wip' created"
+  fi
+
+  echo ""
+  echo "Done. Label issues with 'agent', then run: agentify run"
+}
+
+cmd_test() {
+  require_repo
+  local url
+  url=$(gh issue create \
+    --title "Test: Add a CONTRIBUTORS.md file" \
+    --body "Create a CONTRIBUTORS.md listing the repo owner. This is a test of the agent loop." \
+    --label "agent")
+  echo "Test issue created: $url"
+  echo "Start the loop: agentify run"
+}
+
+cmd_status() {
+  require_repo
+  if [ -f ".agentify/state.json" ]; then
+    echo "State:"
+    jq '.' .agentify/state.json
+    echo ""
+  fi
+
+  echo "Agent issues:"
+  gh issue list --label agent --state all --limit 10 2>/dev/null || true
+  echo ""
+  echo "Agent PRs:"
+  gh pr list --search "head:agent/" --state all --limit 10 2>/dev/null || true
+}
+
+cmd_dashboard() {
+  if [ ! -d ".agentify" ]; then
+    mkdir -p .agentify
+    echo '{}' > .agentify/state.json
+    touch .agentify/events.jsonl
+  fi
+
+  AGENTIFY_DIR=".agentify" python3 "$LIB_DIR/dashboard.py" "$DASHBOARD_PORT" &
+  DASHBOARD_PID=$!
+
+  if command -v open > /dev/null 2>&1; then
+    sleep 0.3 && open "http://localhost:$DASHBOARD_PORT"
+  fi
+
+  trap cleanup SIGINT SIGTERM
+  wait "$DASHBOARD_PID"
+}
+
+cmd_run() {
+  require_repo
+  require_tools
+
+  # Start dashboard
+  if [ "$NO_DASHBOARD" != "true" ]; then
+    mkdir -p .agentify
+    [ -f .agentify/state.json ] || echo '{}' > .agentify/state.json
+    [ -f .agentify/events.jsonl ] || touch .agentify/events.jsonl
+
+    AGENTIFY_DIR=".agentify" python3 "$LIB_DIR/dashboard.py" "$DASHBOARD_PORT" &
+    DASHBOARD_PID=$!
+    printf "  ${C_DIM}├─${C_RESET} dashboard: ${C_TEAL}http://localhost:${DASHBOARD_PORT}${C_RESET}\n"
+
+    if command -v open > /dev/null 2>&1; then
+      sleep 0.3 && open "http://localhost:$DASHBOARD_PORT" 2>/dev/null &
+    fi
+  fi
+
+  trap cleanup SIGINT SIGTERM
+
+  source "$LIB_DIR/loop.sh"
+  main_loop
+}
+
+# -- Parse args --
+COMMAND=""
+MAX_RUNS=0
+POLL_INTERVAL=60
+MAX_CONCURRENT=3
+NO_DASHBOARD="false"
+CODEX_MODEL="gpt-5.4"
+CODEX_EFFORT="high"
+CLAUDE_MODEL="claude-opus-4-6"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    run|init|test|dashboard|status|plan|approve) COMMAND="$1"; shift ;;
+    --max-runs)      shift; MAX_RUNS="$1"; shift ;;
+    --poll)          shift; POLL_INTERVAL="$1"; shift ;;
+    --port)          shift; DASHBOARD_PORT="$1"; shift ;;
+    --concurrency)   shift; MAX_CONCURRENT="$1"; shift ;;
+    --codex-model)   shift; CODEX_MODEL="$1"; shift ;;
+    --codex-effort)  shift; CODEX_EFFORT="$1"; shift ;;
+    --claude-model)  shift; CLAUDE_MODEL="$1"; shift ;;
+    --no-dashboard)  NO_DASHBOARD="true"; shift ;;
+    -h|--help) usage ;;
+    *) echo "Unknown: $1"; usage ;;
+  esac
+done
+
+export MAX_RUNS POLL_INTERVAL MAX_CONCURRENT CODEX_MODEL CODEX_EFFORT CLAUDE_MODEL
+
+[ -z "$COMMAND" ] && usage
+
+cmd_plan() {
+  require_repo
+  local desc="${1:-}"
+  if [ -z "$desc" ]; then
+    echo "Usage: agentify plan \"description of the feature\""
+    exit 1
+  fi
+
+  mkdir -p .agentify
+  [ -f .agentify/state.json ] || echo '{}' > .agentify/state.json
+  [ -f .agentify/events.jsonl ] || touch .agentify/events.jsonl
+
+  source "$LIB_DIR/loop.sh"
+  source "$LIB_DIR/planner.sh"
+  plan_epic "$desc"
+}
+
+cmd_approve() {
+  require_repo
+  local epic_id="${1:-}"
+  if [ -z "$epic_id" ]; then
+    echo "Usage: agentify approve <epic-id>"
+    echo ""
+    echo "Active epics:"
+    for f in .agentify/epics/*.json 2>/dev/null; do
+      [ -f "$f" ] || continue
+      local id=$(jq -r '.id' "$f")
+      local title=$(jq -r '.title' "$f")
+      local status=$(jq -r '.status' "$f")
+      local pending=$(jq '[.proposals[] | select(.status == "pending")] | length' "$f")
+      echo "  $id  $title  ($status, $pending pending)"
+    done
+    exit 1
+  fi
+
+  mkdir -p .agentify
+  [ -f .agentify/state.json ] || echo '{}' > .agentify/state.json
+  [ -f .agentify/events.jsonl ] || touch .agentify/events.jsonl
+
+  source "$LIB_DIR/loop.sh"
+  source "$LIB_DIR/planner.sh"
+  approve_all "$epic_id"
+}
+
+# Grab remaining positional arg for plan/approve
+POSITIONAL=""
+case "$COMMAND" in
+  plan)      POSITIONAL="${1:-}"; shift 2>/dev/null || true ;;
+  approve)   POSITIONAL="${1:-}"; shift 2>/dev/null || true ;;
+esac
+
+case "$COMMAND" in
+  run)       cmd_run ;;
+  plan)      cmd_plan "$POSITIONAL" ;;
+  approve)   cmd_approve "$POSITIONAL" ;;
+  init)      cmd_init ;;
+  test)      cmd_test ;;
+  dashboard) cmd_dashboard ;;
+  status)    cmd_status ;;
+  *)         usage ;;
+esac

@@ -1,0 +1,300 @@
+#!/usr/bin/env python3
+"""agentify dashboard — monitoring + planning UI."""
+import http.server
+import json
+import os
+import subprocess
+import sys
+from socketserver import ThreadingMixIn
+
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 4242
+DATA_DIR = os.environ.get("AGENTIFY_DIR", ".agentify")
+HTML_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html")
+AGENTIFY_BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin", "agentify")
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/":
+            self._serve_file(HTML_FILE, "text/html")
+        elif self.path == "/state":
+            self._serve_state()
+        elif self.path.startswith("/events"):
+            self._serve_events()
+        elif self.path == "/epics":
+            self._serve_epics()
+        else:
+            self.send_error(404)
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length)) if length else {}
+
+        if self.path == "/plan":
+            self._handle_plan(body)
+        elif self.path == "/approve":
+            self._handle_approve(body)
+        elif self.path == "/reject":
+            self._handle_reject(body)
+        elif self.path == "/approve-all":
+            self._handle_approve_all(body)
+        else:
+            self.send_error(404)
+
+    def _serve_file(self, path, content_type):
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.end_headers()
+            self.wfile.write(data)
+        except FileNotFoundError:
+            self.send_error(404)
+
+    def _serve_state(self):
+        state = {}
+        try:
+            with open(os.path.join(DATA_DIR, "state.json")) as f:
+                state = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+
+        # Merge workers
+        workers = {}
+        workers_dir = os.path.join(DATA_DIR, "workers")
+        if os.path.isdir(workers_dir):
+            for fname in os.listdir(workers_dir):
+                if fname.endswith(".json"):
+                    try:
+                        with open(os.path.join(workers_dir, fname)) as f:
+                            workers[fname[:-5]] = json.load(f)
+                    except (json.JSONDecodeError, FileNotFoundError):
+                        pass
+        state["workers"] = workers
+
+        self._json_response(state)
+
+    def _serve_events(self):
+        after = 0
+        if "?" in self.path:
+            for param in self.path.split("?")[1].split("&"):
+                if "=" in param:
+                    k, v = param.split("=", 1)
+                    if k == "after":
+                        after = int(v)
+
+        events = []
+        try:
+            with open(os.path.join(DATA_DIR, "events.jsonl")) as f:
+                for i, line in enumerate(f):
+                    if i >= after:
+                        line = line.strip()
+                        if line:
+                            try:
+                                events.append(json.loads(line))
+                            except json.JSONDecodeError:
+                                pass
+        except FileNotFoundError:
+            pass
+
+        self._json_response({"events": events, "total": after + len(events)})
+
+    def _serve_epics(self):
+        epics = []
+        epics_dir = os.path.join(DATA_DIR, "epics")
+        if os.path.isdir(epics_dir):
+            for fname in sorted(os.listdir(epics_dir)):
+                if fname.endswith(".json"):
+                    try:
+                        with open(os.path.join(epics_dir, fname)) as f:
+                            epics.append(json.load(f))
+                    except (json.JSONDecodeError, FileNotFoundError):
+                        pass
+        self._json_response({"epics": epics})
+
+    def _handle_plan(self, body):
+        description = body.get("description", "")
+        if not description:
+            self._json_response({"error": "No description"}, 400)
+            return
+
+        # Shell out to the planner
+        # We source loop.sh + planner.sh and call plan_epic
+        script = f"""
+source "{os.path.join(os.path.dirname(os.path.abspath(__file__)), 'loop.sh')}"
+source "{os.path.join(os.path.dirname(os.path.abspath(__file__)), 'planner.sh')}"
+AGENTIFY_DIR="{DATA_DIR}"
+EVENTS_FILE="{DATA_DIR}/events.jsonl"
+STATE_FILE="{DATA_DIR}/state.json"
+epic_id=$(plan_epic {json.dumps(description)})
+echo "$epic_id"
+"""
+        try:
+            result = subprocess.run(
+                ["bash", "-c", script],
+                capture_output=True, text=True, timeout=120,
+                env={**os.environ, "AGENTIFY_DIR": DATA_DIR}
+            )
+            epic_id = result.stdout.strip().split("\n")[-1]
+
+            # Read the epic file
+            epic_file = os.path.join(DATA_DIR, "epics", f"{epic_id}.json")
+            if os.path.exists(epic_file):
+                with open(epic_file) as f:
+                    epic = json.load(f)
+                self._json_response({"epic": epic})
+            else:
+                self._json_response({"error": "Planning failed", "stderr": result.stderr}, 500)
+        except subprocess.TimeoutExpired:
+            self._json_response({"error": "Planning timed out"}, 504)
+        except Exception as e:
+            self._json_response({"error": str(e)}, 500)
+
+    def _handle_approve(self, body):
+        epic_id = body.get("epic_id", "")
+        index = body.get("index", 0)
+        epic_file = os.path.join(DATA_DIR, "epics", f"{epic_id}.json")
+
+        if not os.path.exists(epic_file):
+            self._json_response({"error": "Epic not found"}, 404)
+            return
+
+        try:
+            with open(epic_file) as f:
+                epic = json.load(f)
+
+            proposal = epic["proposals"][index]
+            if proposal["status"] != "pending":
+                self._json_response({"error": f"Already {proposal['status']}"}, 400)
+                return
+
+            # Create GitHub issue
+            result = subprocess.run(
+                ["gh", "issue", "create",
+                 "--title", proposal["title"],
+                 "--body", proposal["body"] + f"\n\n---\n*Part of epic: {epic['title']}*",
+                 "--label", "agent"],
+                capture_output=True, text=True, timeout=30
+            )
+
+            if result.returncode != 0:
+                self._json_response({"error": result.stderr}, 500)
+                return
+
+            issue_url = result.stdout.strip()
+            issue_num = int(issue_url.rstrip("/").split("/")[-1])
+
+            epic["proposals"][index]["status"] = "approved"
+            epic["proposals"][index]["issue_number"] = issue_num
+
+            # Check if all resolved
+            pending = sum(1 for p in epic["proposals"] if p["status"] == "pending")
+            if pending == 0:
+                epic["status"] = "active"
+
+            with open(epic_file, "w") as f:
+                json.dump(epic, f)
+
+            self._json_response({"issue_number": issue_num, "url": issue_url})
+        except Exception as e:
+            self._json_response({"error": str(e)}, 500)
+
+    def _handle_reject(self, body):
+        epic_id = body.get("epic_id", "")
+        index = body.get("index", 0)
+        epic_file = os.path.join(DATA_DIR, "epics", f"{epic_id}.json")
+
+        if not os.path.exists(epic_file):
+            self._json_response({"error": "Epic not found"}, 404)
+            return
+
+        try:
+            with open(epic_file) as f:
+                epic = json.load(f)
+
+            epic["proposals"][index]["status"] = "rejected"
+
+            pending = sum(1 for p in epic["proposals"] if p["status"] == "pending")
+            if pending == 0:
+                epic["status"] = "active"
+
+            with open(epic_file, "w") as f:
+                json.dump(epic, f)
+
+            self._json_response({"ok": True})
+        except Exception as e:
+            self._json_response({"error": str(e)}, 500)
+
+    def _handle_approve_all(self, body):
+        epic_id = body.get("epic_id", "")
+        epic_file = os.path.join(DATA_DIR, "epics", f"{epic_id}.json")
+
+        if not os.path.exists(epic_file):
+            self._json_response({"error": "Epic not found"}, 404)
+            return
+
+        try:
+            with open(epic_file) as f:
+                epic = json.load(f)
+
+            results = []
+            for i, p in enumerate(epic["proposals"]):
+                if p["status"] != "pending":
+                    continue
+
+                result = subprocess.run(
+                    ["gh", "issue", "create",
+                     "--title", p["title"],
+                     "--body", p["body"] + f"\n\n---\n*Part of epic: {epic['title']}*",
+                     "--label", "agent"],
+                    capture_output=True, text=True, timeout=30
+                )
+
+                if result.returncode == 0:
+                    issue_url = result.stdout.strip()
+                    issue_num = int(issue_url.rstrip("/").split("/")[-1])
+                    epic["proposals"][i]["status"] = "approved"
+                    epic["proposals"][i]["issue_number"] = issue_num
+                    results.append({"index": i, "issue_number": issue_num})
+
+            epic["status"] = "active"
+            with open(epic_file, "w") as f:
+                json.dump(epic, f)
+
+            self._json_response({"approved": results})
+        except Exception as e:
+            self._json_response({"error": str(e)}, 500)
+
+    def _json_response(self, data, status=200):
+        body = json.dumps(data).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        pass
+
+
+class ThreadedServer(ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+
+
+if __name__ == "__main__":
+    server = ThreadedServer(("", PORT), Handler)
+    print(f"  Dashboard: http://localhost:{PORT}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass

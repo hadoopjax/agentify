@@ -1,0 +1,838 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agentify</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #FAF6F1;
+    --surface: #FFFFFF;
+    --surface-hover: #FEFCFA;
+    --coral: #F2706D;
+    --coral-soft: #FFF0EF;
+    --teal: #2BB5A6;
+    --teal-soft: #E8F8F5;
+    --seafoam: #CBF3F0;
+    --sand: #F0B456;
+    --sand-soft: #FFF8EC;
+    --violet: #7C6AEF;
+    --violet-soft: #F0EDFF;
+    --mint: #E8F5E9;
+    --text: #1A2B2B;
+    --text-secondary: #637272;
+    --text-tertiary: #9DAEAE;
+    --border: #EDE8E1;
+    --border-light: #F5F0EA;
+    --radius: 14px;
+    --radius-sm: 10px;
+    --shadow: 0 1px 2px rgba(0,0,0,0.03), 0 4px 16px rgba(0,0,0,0.04);
+    --shadow-lg: 0 2px 4px rgba(0,0,0,0.04), 0 8px 32px rgba(0,0,0,0.06);
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .shell {
+    max-width: 680px;
+    margin: 0 auto;
+    padding: 40px 24px 60px;
+  }
+
+  /* Header */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 36px;
+  }
+
+  .logo-group { display: flex; align-items: baseline; gap: 10px; }
+
+  .logo {
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: -0.3px;
+    color: var(--text);
+  }
+
+  .repo-name {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-weight: 500;
+  }
+
+  .header-status { display: flex; align-items: center; gap: 8px; }
+
+  .pill {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 4px 12px;
+    border-radius: 20px;
+    letter-spacing: 0.3px;
+  }
+  .pill-idle { background: var(--sand-soft); color: #B8860B; }
+  .pill-active { background: var(--teal-soft); color: #1A8A7D; }
+
+  .beacon {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--text-tertiary);
+    transition: background 0.3s;
+  }
+  .beacon.on {
+    background: var(--teal);
+    box-shadow: 0 0 0 3px rgba(43,181,166,0.2);
+    animation: breathe 2.5s ease-in-out infinite;
+  }
+  @keyframes breathe { 0%,100%{ box-shadow: 0 0 0 3px rgba(43,181,166,0.2) } 50%{ box-shadow: 0 0 0 6px rgba(43,181,166,0.08) } }
+
+  /* Sections */
+  .section { margin-bottom: 32px; }
+  .section-head {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-tertiary);
+    margin-bottom: 12px;
+    padding-left: 2px;
+  }
+
+  /* Plan bar */
+  .plan-bar {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 6px 6px 6px 20px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 36px;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+  .plan-bar:focus-within {
+    border-color: var(--teal);
+    box-shadow: 0 0 0 3px rgba(43,181,166,0.1), var(--shadow);
+  }
+
+  .plan-bar input {
+    flex: 1;
+    border: none;
+    outline: none;
+    font-size: 14px;
+    font-family: inherit;
+    color: var(--text);
+    background: transparent;
+    line-height: 1.5;
+  }
+  .plan-bar input::placeholder { color: var(--text-tertiary); }
+
+  .btn {
+    border: none;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 13px;
+    padding: 10px 20px;
+    border-radius: var(--radius-sm);
+    font-family: inherit;
+    transition: all 0.15s ease;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-width: 0;
+    line-height: 1;
+  }
+  .btn:active { transform: scale(0.97); }
+  .btn:disabled { opacity: 0.5; cursor: default; transform: none; }
+
+  .btn-primary { background: var(--teal); color: white; }
+  .btn-primary:hover:not(:disabled) { background: #26A697; }
+
+  .btn-danger { background: var(--coral); color: white; }
+  .btn-danger:hover:not(:disabled) { background: #E0605D; }
+
+  .btn-ghost {
+    background: transparent;
+    color: var(--text-secondary);
+    padding: 6px 12px;
+    font-size: 12px;
+  }
+  .btn-ghost:hover { background: var(--border-light); }
+
+  .btn-sm { padding: 6px 14px; font-size: 12px; border-radius: 8px; }
+
+  .spinner {
+    display: inline-block;
+    width: 14px; height: 14px;
+    border: 2px solid rgba(255,255,255,0.3);
+    border-top-color: white;
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Cards */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    transition: box-shadow 0.2s;
+  }
+  .card + .card { margin-top: 10px; }
+
+  /* Epics */
+  .epic-card { padding: 20px 24px; }
+
+  .epic-top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .epic-title { font-size: 15px; font-weight: 600; line-height: 1.4; }
+
+  .badge {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    padding: 3px 10px;
+    border-radius: 6px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .badge-planning { background: var(--violet-soft); color: var(--violet); }
+  .badge-active { background: var(--teal-soft); color: #1A8A7D; }
+  .badge-complete { background: var(--mint); color: #2E7D32; }
+
+  .progress-track {
+    height: 4px;
+    background: var(--border-light);
+    border-radius: 2px;
+    margin-top: 14px;
+    overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%;
+    background: var(--teal);
+    border-radius: 2px;
+    transition: width 0.4s ease;
+  }
+
+  .epic-meta {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    margin-top: 6px;
+  }
+
+  .epic-notes {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 14px;
+    padding: 10px 14px;
+    background: var(--border-light);
+    border-radius: var(--radius-sm);
+    line-height: 1.5;
+  }
+
+  .epic-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 14px;
+  }
+
+  .proposals { margin-top: 6px; }
+
+  .proposal-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 0;
+    border-top: 1px solid var(--border-light);
+  }
+
+  .proposal-info { flex: 1; min-width: 0; }
+  .proposal-title {
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.4;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .proposal-src {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    margin-top: 2px;
+  }
+  .proposal-src-claude { color: var(--coral); }
+  .proposal-src-gpt { color: var(--violet); }
+
+  .proposal-btns { display: flex; gap: 6px; flex-shrink: 0; }
+
+  .proposal-done {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--teal);
+    font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+  .proposal-skip {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    text-decoration: line-through;
+  }
+
+  /* Workers */
+  .worker-card {
+    padding: 20px 24px;
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+  }
+
+  .worker-icon {
+    width: 36px; height: 36px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+    flex-shrink: 0;
+    font-weight: 700;
+    color: white;
+  }
+  .worker-icon-coding { background: var(--teal); }
+  .worker-icon-reviewing { background: var(--coral); }
+  .worker-icon-retrying { background: var(--sand); }
+  .worker-icon-pr, .worker-icon-ci { background: var(--violet); }
+  .worker-icon-merging { background: #2E7D32; }
+  .worker-icon-idle, .worker-icon-starting { background: var(--text-tertiary); }
+
+  .worker-body { flex: 1; min-width: 0; }
+
+  .worker-phase {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    margin-bottom: 4px;
+  }
+  .worker-phase-coding { color: var(--teal); }
+  .worker-phase-reviewing { color: var(--coral); }
+  .worker-phase-retrying { color: var(--sand); }
+  .worker-phase-pr, .worker-phase-ci { color: var(--violet); }
+  .worker-phase-merging { color: #2E7D32; }
+  .worker-phase-idle, .worker-phase-starting { color: var(--text-tertiary); }
+
+  .worker-title {
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1.35;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .worker-branch {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    margin-top: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Empty states */
+  .empty-state {
+    padding: 40px 24px;
+    text-align: center;
+  }
+  .empty-state p {
+    font-size: 13px;
+    color: var(--text-tertiary);
+    line-height: 1.6;
+  }
+  .empty-state code {
+    font-size: 12px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    background: var(--border-light);
+    padding: 2px 7px;
+    border-radius: 5px;
+    color: var(--text-secondary);
+  }
+
+  /* Timeline */
+  .timeline-card {
+    max-height: 320px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .timeline-card::-webkit-scrollbar { width: 0; }
+
+  .ev-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 10px 20px;
+    border-top: 1px solid var(--border-light);
+    font-size: 13px;
+  }
+  .ev-row:first-child { border-top: none; }
+
+  .ev-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    margin-top: 6px;
+    flex-shrink: 0;
+  }
+  .ev-text { flex: 1; color: var(--text-secondary); line-height: 1.45; }
+  .ev-when {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    margin-left: 8px;
+    flex-shrink: 0;
+  }
+
+  /* Stats */
+  .stats-row {
+    display: flex;
+    justify-content: center;
+    gap: 48px;
+    padding: 8px 0 0;
+  }
+  .stat { text-align: center; }
+  .stat-num {
+    font-size: 26px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.2;
+  }
+  .stat-num-teal { color: var(--teal); }
+  .stat-num-coral { color: var(--coral); }
+  .stat-num-sand { color: var(--sand); }
+  .stat-lbl {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-tertiary);
+    margin-top: 2px;
+  }
+
+  /* Animations */
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .card[data-new] { animation: slideIn 0.25s ease; }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <header>
+    <div class="logo-group">
+      <span class="logo">agentify</span>
+      <span class="repo-name" id="repo"></span>
+    </div>
+    <div class="header-status">
+      <span class="pill pill-idle" id="pill">idle</span>
+      <div class="beacon" id="beacon"></div>
+    </div>
+  </header>
+
+  <div class="plan-bar">
+    <input type="text" id="plan-input" placeholder="Describe a feature to plan...">
+    <button class="btn btn-primary" id="plan-btn">Plan</button>
+  </div>
+
+  <div id="epics-section" class="section" style="display:none">
+    <div class="section-head">Epics</div>
+    <div id="epics"></div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">Workers</div>
+    <div id="workers">
+      <div class="card" id="workers-empty">
+        <div class="empty-state">
+          <p>No active workers.<br>Label an issue with <code>agent</code> or plan an epic above.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">Activity</div>
+    <div class="card timeline-card" id="timeline">
+      <div class="empty-state" id="tl-empty">
+        <p>No events yet.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="stats-row">
+    <div class="stat">
+      <div class="stat-num stat-num-teal" id="s-done">0</div>
+      <div class="stat-lbl">Completed</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num stat-num-coral" id="s-err">0</div>
+      <div class="stat-lbl">Errors</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num stat-num-sand" id="s-up">0s</div>
+      <div class="stat-lbl">Uptime</div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// -- State --
+let evCount = 0, t0 = Date.now();
+let prevWorkerKeys = new Set();
+let prevEpicData = '';
+let planning = false;
+
+const phaseLabel = {
+  idle:'Idle', starting:'Starting', coding:'Coding',
+  reviewing:'Reviewing', retrying:'Retrying',
+  pr:'Opening PR', ci:'CI Checks', merging:'Merging'
+};
+
+const phaseIcon = {
+  coding:'C', reviewing:'R', retrying:'!', pr:'PR', ci:'CI', merging:'M',
+  idle:'~', starting:'...'
+};
+
+const evColor = {
+  loop_start:'var(--teal)', issue_picked:'var(--sand)',
+  coding_start:'var(--teal)', coding_done:'var(--teal)',
+  review_start:'var(--coral)', review_done:'var(--coral)',
+  pr_created:'var(--violet)', pr_merged:'var(--teal)',
+  ci_waiting:'var(--violet)', ci_passed:'var(--teal)', ci_failed:'var(--coral)',
+  error:'var(--coral)', idle:'var(--sand)', retry:'var(--sand)',
+  loop_end:'var(--teal)', plan_start:'var(--violet)', plan_done:'var(--violet)',
+  plan_claude:'var(--coral)', plan_gpt:'var(--sand)',
+  epic_complete:'var(--teal)', issue_approved:'var(--teal)'
+};
+
+// -- Utilities --
+function ago(ts) {
+  const s = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
+  if (s < 5) return 'now';
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm';
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return m > 0 ? h + 'h ' + m + 'm' : h + 'h';
+}
+function uptime() {
+  const s = Math.floor((Date.now() - t0) / 1000);
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm';
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return m > 0 ? h + 'h ' + m + 'm' : h + 'h';
+}
+
+function $(id) { return document.getElementById(id); }
+
+// -- Plan --
+async function submitPlan() {
+  const input = $('plan-input');
+  const btn = $('plan-btn');
+  const desc = input.value.trim();
+  if (!desc || planning) return;
+
+  planning = true;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>';
+  input.disabled = true;
+
+  try {
+    const res = await fetch('/plan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ description: desc })
+    });
+    const data = await res.json();
+    if (data.error) alert('Planning failed: ' + data.error);
+    else { input.value = ''; fetchEpics(); }
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+
+  planning = false;
+  btn.disabled = false;
+  btn.textContent = 'Plan';
+  input.disabled = false;
+}
+
+$('plan-btn').addEventListener('click', submitPlan);
+$('plan-input').addEventListener('keydown', e => { if (e.key === 'Enter') submitPlan(); });
+
+// -- Approve / Reject --
+async function approveIssue(epicId, index) {
+  await fetch('/approve', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ epic_id: epicId, index })
+  });
+  fetchEpics();
+}
+
+async function rejectIssue(epicId, index) {
+  await fetch('/reject', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ epic_id: epicId, index })
+  });
+  fetchEpics();
+}
+
+async function approveAll(epicId, btn) {
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Approving';
+  await fetch('/approve-all', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ epic_id: epicId })
+  });
+  fetchEpics();
+}
+
+// -- Epics --
+async function fetchEpics() {
+  try {
+    const res = await fetch('/epics');
+    const data = await res.json();
+    const json = JSON.stringify(data.epics || []);
+    if (json !== prevEpicData) {
+      prevEpicData = json;
+      renderEpics(data.epics || []);
+    }
+  } catch (e) {}
+}
+
+function renderEpics(epics) {
+  const section = $('epics-section');
+  const container = $('epics');
+
+  if (epics.length === 0) { section.style.display = 'none'; return; }
+  section.style.display = '';
+
+  // Rebuild — epics change infrequently, so full rebuild on change is fine
+  container.innerHTML = '';
+
+  epics.forEach(epic => {
+    const card = document.createElement('div');
+    card.className = 'card epic-card';
+
+    const approved = epic.proposals.filter(p => p.status === 'approved');
+    const active = epic.proposals.filter(p => p.status !== 'rejected');
+    const pending = epic.proposals.filter(p => p.status === 'pending');
+    const pct = active.length > 0 ? (approved.length / active.length * 100) : 0;
+
+    let html = '<div class="epic-top">'
+      + '<div class="epic-title">' + esc(epic.title) + '</div>'
+      + '<span class="badge badge-' + epic.status + '">' + epic.status + '</span>'
+      + '</div>';
+
+    if (epic.status === 'active' || epic.status === 'complete') {
+      html += '<div class="progress-track"><div class="progress-fill" style="width:' + pct + '%"></div></div>'
+        + '<div class="epic-meta">' + approved.length + ' / ' + active.length + ' issues approved</div>';
+    }
+
+    if (epic.claude_notes || epic.gpt_notes) {
+      let notes = '';
+      if (epic.claude_notes) notes += '<strong>Claude:</strong> ' + esc(epic.claude_notes);
+      if (epic.gpt_notes) notes += (notes ? '<br>' : '') + '<strong>GPT-5.4:</strong> ' + esc(epic.gpt_notes);
+      html += '<div class="epic-notes">' + notes + '</div>';
+    }
+
+    if (pending.length > 0) {
+      html += '<div class="epic-actions">'
+        + '<button class="btn btn-primary btn-sm" onclick="approveAll(\'' + epic.id + '\', this)">Approve all (' + pending.length + ')</button>'
+        + '</div>';
+    }
+
+    html += '<div class="proposals">';
+    epic.proposals.forEach((p, i) => {
+      const srcClass = p.source === 'claude' ? 'proposal-src-claude' : 'proposal-src-gpt';
+      html += '<div class="proposal-row">'
+        + '<div class="proposal-info">'
+        + '<div class="proposal-title">' + esc(p.title) + '</div>'
+        + '<div class="proposal-src ' + srcClass + '">' + esc(p.source) + '</div>'
+        + '</div>';
+
+      if (p.status === 'pending') {
+        html += '<div class="proposal-btns">'
+          + '<button class="btn btn-primary btn-sm" onclick="approveIssue(\'' + epic.id + '\',' + i + ')">Approve</button>'
+          + '<button class="btn btn-danger btn-sm" onclick="rejectIssue(\'' + epic.id + '\',' + i + ')">Reject</button>'
+          + '</div>';
+      } else if (p.status === 'approved') {
+        html += '<span class="proposal-done">#' + (p.issue_number || '') + '</span>';
+      } else {
+        html += '<span class="proposal-skip">skipped</span>';
+      }
+
+      html += '</div>';
+    });
+    html += '</div>';
+
+    card.innerHTML = html;
+    container.appendChild(card);
+  });
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s || '';
+  return d.innerHTML;
+}
+
+// -- Workers --
+function updateWorkers(workers) {
+  const container = $('workers');
+  const entries = Object.entries(workers || {});
+  const pill = $('pill');
+  const beacon = $('beacon');
+  const emptyEl = $('workers-empty');
+
+  if (entries.length === 0) {
+    if (emptyEl) emptyEl.style.display = '';
+    pill.textContent = 'idle';
+    pill.className = 'pill pill-idle';
+    beacon.className = 'beacon';
+    // Remove any leftover worker cards
+    container.querySelectorAll('.card[data-wk]').forEach(c => c.remove());
+    prevWorkerKeys = new Set();
+    return;
+  }
+
+  if (emptyEl) emptyEl.style.display = 'none';
+  pill.textContent = entries.length + ' active';
+  pill.className = 'pill pill-active';
+  beacon.className = 'beacon on';
+
+  const currentKeys = new Set(entries.map(([k]) => k));
+
+  // Remove gone workers
+  container.querySelectorAll('.card[data-wk]').forEach(c => {
+    if (!currentKeys.has(c.dataset.wk)) c.remove();
+  });
+
+  entries.forEach(([num, w]) => {
+    const phase = w.phase || 'idle';
+    let card = container.querySelector('.card[data-wk="' + num + '"]');
+    const isNew = !card;
+
+    if (isNew) {
+      card = document.createElement('div');
+      card.className = 'card';
+      card.dataset.wk = num;
+      card.setAttribute('data-new', '');
+      container.appendChild(card);
+      // Remove animation attr after it plays
+      card.addEventListener('animationend', () => card.removeAttribute('data-new'), { once: true });
+    }
+
+    // Update contents only if changed
+    const title = w.title ? '#' + num + ' ' + w.title : '#' + num;
+    const branch = w.branch || '';
+    const key = phase + '|' + title + '|' + branch;
+
+    if (card.dataset.key === key) return;
+    card.dataset.key = key;
+
+    card.innerHTML = '<div class="worker-card">'
+      + '<div class="worker-icon worker-icon-' + phase + '">' + (phaseIcon[phase] || '?') + '</div>'
+      + '<div class="worker-body">'
+      + '<div class="worker-phase worker-phase-' + phase + '">' + (phaseLabel[phase] || phase) + '</div>'
+      + '<div class="worker-title">' + esc(title) + '</div>'
+      + (branch ? '<div class="worker-branch">' + esc(branch) + '</div>' : '')
+      + '</div></div>';
+  });
+
+  prevWorkerKeys = currentKeys;
+}
+
+// -- Timeline --
+function addEvent(ev) {
+  const tl = $('timeline');
+  const empty = $('tl-empty');
+  if (empty) empty.remove();
+
+  const row = document.createElement('div');
+  row.className = 'ev-row';
+  row.dataset.ts = ev.ts;
+
+  row.innerHTML = '<div class="ev-dot" style="background:' + (evColor[ev.type] || 'var(--text-tertiary)') + '"></div>'
+    + '<div class="ev-text">' + esc(ev.msg) + '</div>'
+    + '<div class="ev-when">' + ago(ev.ts) + '</div>';
+
+  tl.insertBefore(row, tl.firstChild);
+
+  // Cap at 80 events
+  while (tl.children.length > 80) tl.removeChild(tl.lastChild);
+}
+
+// -- Polling --
+async function poll() {
+  try {
+    const stRes = await fetch('/state');
+    const st = await stRes.json();
+
+    if (st.repo) $('repo').textContent = st.repo;
+    updateWorkers(st.workers);
+    $('s-done').textContent = st.completed || '0';
+    $('s-err').textContent = st.errors || '0';
+
+    const evRes = await fetch('/events?after=' + evCount);
+    const data = await evRes.json();
+    if (data.events && data.events.length > 0) {
+      if (evCount === 0 && data.events.length > 0) {
+        t0 = new Date(data.events[0].ts).getTime();
+      }
+      data.events.forEach(addEvent);
+      evCount = data.total;
+    }
+  } catch (e) {}
+}
+
+function refreshTimes() {
+  $('s-up').textContent = uptime();
+  document.querySelectorAll('.ev-row').forEach(el => {
+    if (el.dataset.ts) {
+      const when = el.querySelector('.ev-when');
+      if (when) when.textContent = ago(el.dataset.ts);
+    }
+  });
+}
+
+// -- Init --
+setInterval(poll, 1500);
+setInterval(fetchEpics, 5000);
+setInterval(refreshTimes, 5000);
+poll();
+fetchEpics();
+</script>
+</body>
+</html>
