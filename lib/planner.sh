@@ -7,7 +7,7 @@ EPICS_DIR="$AGENTIFY_DIR/epics"
 call_gpt() {
   local prompt="$1"
   local response
-  response=$(curl -s https://api.openai.com/v1/chat/completions \
+  response=$(curl -s --connect-timeout 10 --max-time 180 https://api.openai.com/v1/chat/completions \
     -H "Authorization: Bearer $OPENAI_API_KEY" \
     -H "Content-Type: application/json" \
     -d "$(jq -nc --arg model "$CODEX_MODEL" --arg prompt "$prompt" '{
@@ -22,6 +22,17 @@ call_gpt() {
   fi
 
   echo "$response" | jq -er '.choices[0].message.content'
+}
+
+compact_issue_digest() {
+  local issues_json="$1"
+  echo "$issues_json" | jq -c '
+    map({
+      number,
+      title,
+      labels
+    })
+  '
 }
 
 extract_json() {
@@ -378,7 +389,9 @@ group_existing_issues() {
 
   local critique_template
   critique_template=$(cat "$PROMPTS_DIR/group-existing-critique.md")
-  critique_template="${critique_template//\{\{ISSUES_JSON\}\}/$issues_json}"
+  local critique_issues
+  critique_issues=$(compact_issue_digest "$issues_json")
+  critique_template="${critique_template//\{\{ISSUES_JSON\}\}/$critique_issues}"
   local critique_groups
   critique_groups=$(echo "$claude_groups" | jq -c '{
     groups: [.groups[]? | {
