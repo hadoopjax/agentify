@@ -23,6 +23,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._serve_events()
         elif self.path == "/epics":
             self._serve_epics()
+        elif self.path == "/triage":
+            self._serve_triage()
         else:
             self.send_error(404)
 
@@ -38,6 +40,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._handle_reject(body)
         elif self.path == "/approve-all":
             self._handle_approve_all(body)
+        elif self.path == "/triage/assign":
+            self._handle_triage_assign(body)
+        elif self.path == "/triage/skip":
+            self._handle_triage_skip(body)
         else:
             self.send_error(404)
 
@@ -263,6 +269,74 @@ echo "$epic_id"
                 json.dump(epic, f)
 
             self._json_response({"approved": results})
+        except Exception as e:
+            self._json_response({"error": str(e)}, 500)
+
+    def _serve_triage(self):
+        """Fetch open issues not labeled agent/agent-wip/agent-skip."""
+        try:
+            result = subprocess.run(
+                ["gh", "issue", "list", "--state", "open", "--limit", "50",
+                 "--json", "number,title,body,labels,createdAt"],
+                capture_output=True, text=True, timeout=15
+            )
+            if result.returncode != 0:
+                self._json_response({"error": result.stderr, "issues": []}, 500)
+                return
+
+            all_issues = json.loads(result.stdout) if result.stdout.strip() else []
+            skip_labels = {"agent", "agent-wip", "agent-skip"}
+            untriaged = []
+            for issue in all_issues:
+                issue_labels = {l["name"] for l in issue.get("labels", [])}
+                if not issue_labels & skip_labels:
+                    untriaged.append({
+                        "number": issue["number"],
+                        "title": issue["title"],
+                        "body": (issue.get("body") or "")[:300],
+                        "labels": [l["name"] for l in issue.get("labels", [])],
+                        "created_at": issue.get("createdAt", ""),
+                    })
+
+            self._json_response({"issues": untriaged})
+        except subprocess.TimeoutExpired:
+            self._json_response({"error": "Timed out fetching issues", "issues": []}, 504)
+        except Exception as e:
+            self._json_response({"error": str(e), "issues": []}, 500)
+
+    def _handle_triage_assign(self, body):
+        """Add 'agent' label to an issue."""
+        num = body.get("number")
+        if not num:
+            self._json_response({"error": "No issue number"}, 400)
+            return
+        try:
+            result = subprocess.run(
+                ["gh", "issue", "edit", str(num), "--add-label", "agent"],
+                capture_output=True, text=True, timeout=15
+            )
+            if result.returncode != 0:
+                self._json_response({"error": result.stderr}, 500)
+            else:
+                self._json_response({"ok": True, "number": num})
+        except Exception as e:
+            self._json_response({"error": str(e)}, 500)
+
+    def _handle_triage_skip(self, body):
+        """Add 'agent-skip' label to an issue."""
+        num = body.get("number")
+        if not num:
+            self._json_response({"error": "No issue number"}, 400)
+            return
+        try:
+            result = subprocess.run(
+                ["gh", "issue", "edit", str(num), "--add-label", "agent-skip"],
+                capture_output=True, text=True, timeout=15
+            )
+            if result.returncode != 0:
+                self._json_response({"error": result.stderr}, 500)
+            else:
+                self._json_response({"ok": True, "number": num})
         except Exception as e:
             self._json_response({"error": str(e)}, 500)
 

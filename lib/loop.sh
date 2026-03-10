@@ -83,7 +83,7 @@ remove_worker() {
 # -- Worker management --
 active_worker_count() {
   local count=0
-  for pidfile in "$WORKERS_DIR"/*.pid 2>/dev/null; do
+  for pidfile in "$WORKERS_DIR"/*.pid; do
     [ -f "$pidfile" ] || continue
     kill -0 "$(cat "$pidfile")" 2>/dev/null && ((count++))
   done
@@ -91,7 +91,7 @@ active_worker_count() {
 }
 
 reap_workers() {
-  for pidfile in "$WORKERS_DIR"/*.pid 2>/dev/null; do
+  for pidfile in "$WORKERS_DIR"/*.pid; do
     [ -f "$pidfile" ] || continue
     local pid=$(cat "$pidfile")
     local num=$(basename "$pidfile" .pid)
@@ -436,7 +436,7 @@ main_loop() {
 
   # Wait for remaining workers before exiting
   log "${C_DIM}Waiting for active workers..."
-  for pidfile in "$WORKERS_DIR"/*.pid 2>/dev/null; do
+  for pidfile in "$WORKERS_DIR"/*.pid; do
     [ -f "$pidfile" ] || continue
     wait "$(cat "$pidfile")" 2>/dev/null
     local num=$(basename "$pidfile" .pid)

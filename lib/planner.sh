@@ -231,7 +231,7 @@ approve_all() {
 }
 
 check_epic_completion() {
-  for epic_file in "$EPICS_DIR"/*.json 2>/dev/null; do
+  for epic_file in "$EPICS_DIR"/*.json; do
     [ -f "$epic_file" ] || continue
 
     local status=$(jq -r '.status' "$epic_file")

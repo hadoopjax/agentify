@@ -35,6 +35,16 @@ agentify run
 4. You approve/reject in the dashboard or via `agentify approve <id>`
 5. Approved issues get the `agent` label
 
+### Triage
+
+Point agentify at a repo with existing issues:
+
+1. `agentify triage` lists open issues that haven't been triaged
+2. Dashboard shows a **Triage** section with all untriaged issues
+3. **Assign** adds the `agent` label — the loop will pick it up
+4. **Skip** adds `agent-skip` — hides it from future triage
+5. Issues already labeled `agent`, `agent-wip`, or `agent-skip` are excluded
+
 ### Execution
 
 1. Dispatcher picks up to N issues labeled `agent` (default: 3 concurrent)
@@ -87,7 +97,8 @@ Dashboard at `http://localhost:4242`. With Tailscale, accessible from any device
 agentify run              Start the loop + dashboard
 agentify plan "desc"      Plan an epic (Claude + GPT-5.4 dialectic)
 agentify approve <id>     Approve all pending issues for an epic
-agentify init             Create agent/agent-wip labels
+agentify triage           Review existing issues — assign or skip
+agentify init             Create agent/agent-wip/agent-skip labels
 agentify test             Create a test issue
 agentify dashboard        Open just the dashboard
 agentify status           Show state + recent activity

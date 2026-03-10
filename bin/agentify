@@ -14,14 +14,15 @@ DASHBOARD_PORT="${DASHBOARD_PORT:-4242}"
 DASHBOARD_PID=""
 
 usage() {
-  cat <<EOF
+  cat <<'EOF'
 Usage: agentify <command> [options]
 
 Commands:
   run          Start the agent loop (from inside a git repo)
-  plan "desc"  Plan an epic — Claude + GPT-5.4 break it into issues
+  plan "desc"  Plan an epic (Claude + GPT-5.4 dialectic)
   approve ID   Approve all proposed issues for an epic
-  init         Create the 'agent' + 'agent-wip' labels
+  triage       Review existing issues and assign to agent or skip
+  init         Create agent/agent-wip/agent-skip labels
   test         Create a test issue to trigger the loop
   dashboard    Open just the dashboard
   status       Show current state + recent activity
@@ -34,7 +35,7 @@ Options:
   --codex-effort L     Reasoning effort: low, medium, high (default: high)
   --claude-model M     Claude model (default: claude-opus-4-6)
   --concurrency N      Parallel workers (default: 3)
-  --no-dashboard       Don't start the dashboard
+  --no-dashboard       Skip the dashboard
 EOF
   exit 1
 }
@@ -42,9 +43,9 @@ EOF
 cleanup() {
   printf "\n  ${C_DIM}stopping workers...${C_RESET}\n"
   # Kill all worker processes
-  for pidfile in .agentify/workers/*.pid 2>/dev/null; do
+  for pidfile in .agentify/workers/*.pid; do
     [ -f "$pidfile" ] || continue
-    kill "$(cat "$pidfile")" 2>/dev/null
+    kill "$(cat "$pidfile")" 2>/dev/null || true
   done
   [ -n "$DASHBOARD_PID" ] && kill "$DASHBOARD_PID" 2>/dev/null
   printf "  ${C_DIM}agentify stopped${C_RESET}\n\n"
@@ -89,8 +90,16 @@ cmd_init() {
     echo "  Label 'agent-wip' created"
   fi
 
+  if gh label list 2>/dev/null | grep -q "agent-skip"; then
+    echo "  Label 'agent-skip' already exists"
+  else
+    gh label create agent-skip --description "Triaged — not for the agent" --color "D1D5DB"
+    echo "  Label 'agent-skip' created"
+  fi
+
   echo ""
   echo "Done. Label issues with 'agent', then run: agentify run"
+  echo "Or run: agentify triage   to review existing issues"
 }
 
 cmd_test() {
@@ -174,7 +183,7 @@ CLAUDE_MODEL="claude-opus-4-6"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    run|init|test|dashboard|status|plan|approve) COMMAND="$1"; shift ;;
+    run|init|test|dashboard|status|plan|approve|triage) COMMAND="$1"; shift ;;
     --max-runs)      shift; MAX_RUNS="$1"; shift ;;
     --poll)          shift; POLL_INTERVAL="$1"; shift ;;
     --port)          shift; DASHBOARD_PORT="$1"; shift ;;
@@ -216,7 +225,7 @@ cmd_approve() {
     echo "Usage: agentify approve <epic-id>"
     echo ""
     echo "Active epics:"
-    for f in .agentify/epics/*.json 2>/dev/null; do
+    for f in .agentify/epics/*.json; do
       [ -f "$f" ] || continue
       local id=$(jq -r '.id' "$f")
       local title=$(jq -r '.title' "$f")
@@ -236,6 +245,33 @@ cmd_approve() {
   approve_all "$epic_id"
 }
 
+cmd_triage() {
+  require_repo
+  echo "Fetching open issues..."
+  local issues
+  issues=$(gh issue list --state open --limit 50 --json number,title,labels)
+
+  # Filter to issues without agent/agent-wip/agent-skip labels
+  local untriaged
+  untriaged=$(echo "$issues" | jq -c '[.[] | select(
+    [.labels[].name] | (contains(["agent"]) or contains(["agent-wip"]) or contains(["agent-skip"])) | not
+  )]')
+
+  local count=$(echo "$untriaged" | jq 'length')
+  if [ "$count" -eq 0 ]; then
+    echo "No untriaged issues found."
+    echo "All open issues already have agent, agent-wip, or agent-skip labels."
+    return 0
+  fi
+
+  echo ""
+  printf "  ${C_BOLD}$count untriaged issues:${C_RESET}\n\n"
+  echo "$untriaged" | jq -r '.[] | "  #\(.number)  \(.title)"'
+  echo ""
+  echo "Open the dashboard to triage: http://localhost:${DASHBOARD_PORT}"
+  echo "Or label manually:  gh issue edit <num> --add-label agent"
+}
+
 # Grab remaining positional arg for plan/approve
 POSITIONAL=""
 case "$COMMAND" in
@@ -247,6 +283,7 @@ case "$COMMAND" in
   run)       cmd_run ;;
   plan)      cmd_plan "$POSITIONAL" ;;
   approve)   cmd_approve "$POSITIONAL" ;;
+  triage)    cmd_triage ;;
   init)      cmd_init ;;
   test)      cmd_test ;;
   dashboard) cmd_dashboard ;;

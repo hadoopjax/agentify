@@ -436,6 +436,62 @@
     margin-top: 2px;
   }
 
+  /* Triage */
+  .triage-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 20px;
+    border-top: 1px solid var(--border-light);
+  }
+  .triage-row:first-child { border-top: none; }
+
+  .triage-num {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    flex-shrink: 0;
+    min-width: 36px;
+  }
+  .triage-info { flex: 1; min-width: 0; }
+  .triage-title {
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.4;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .triage-body {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-top: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .triage-labels {
+    display: flex;
+    gap: 4px;
+    margin-top: 4px;
+  }
+  .triage-label {
+    font-size: 10px;
+    padding: 1px 7px;
+    border-radius: 4px;
+    background: var(--border-light);
+    color: var(--text-secondary);
+  }
+  .triage-btns { display: flex; gap: 6px; flex-shrink: 0; }
+
+  .triage-count {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    font-weight: 500;
+    margin-left: auto;
+  }
+
   /* Animations */
   @keyframes slideIn {
     from { opacity: 0; transform: translateY(6px); }
@@ -461,6 +517,14 @@
   <div class="plan-bar">
     <input type="text" id="plan-input" placeholder="Describe a feature to plan...">
     <button class="btn btn-primary" id="plan-btn">Plan</button>
+  </div>
+
+  <div id="triage-section" class="section" style="display:none">
+    <div class="section-head">
+      Triage
+      <span class="triage-count" id="triage-count"></span>
+    </div>
+    <div class="card" id="triage-list"></div>
   </div>
 
   <div id="epics-section" class="section" style="display:none">
@@ -587,6 +651,92 @@ async function submitPlan() {
 
 $('plan-btn').addEventListener('click', submitPlan);
 $('plan-input').addEventListener('keydown', e => { if (e.key === 'Enter') submitPlan(); });
+
+// -- Triage --
+let prevTriageData = '';
+
+async function fetchTriage() {
+  try {
+    const res = await fetch('/triage');
+    const data = await res.json();
+    const json = JSON.stringify(data.issues || []);
+    if (json !== prevTriageData) {
+      prevTriageData = json;
+      renderTriage(data.issues || []);
+    }
+  } catch (e) {}
+}
+
+function renderTriage(issues) {
+  const section = $('triage-section');
+  const container = $('triage-list');
+  const countEl = $('triage-count');
+
+  if (issues.length === 0) { section.style.display = 'none'; return; }
+  section.style.display = '';
+  countEl.textContent = issues.length + ' issues';
+
+  container.innerHTML = '';
+  issues.forEach(issue => {
+    const row = document.createElement('div');
+    row.className = 'triage-row';
+    row.id = 'triage-' + issue.number;
+
+    let labels = '';
+    if (issue.labels && issue.labels.length > 0) {
+      labels = '<div class="triage-labels">'
+        + issue.labels.map(l => '<span class="triage-label">' + esc(l) + '</span>').join('')
+        + '</div>';
+    }
+
+    row.innerHTML = '<span class="triage-num">#' + issue.number + '</span>'
+      + '<div class="triage-info">'
+      + '<div class="triage-title">' + esc(issue.title) + '</div>'
+      + (issue.body ? '<div class="triage-body">' + esc(issue.body) + '</div>' : '')
+      + labels
+      + '</div>'
+      + '<div class="triage-btns">'
+      + '<button class="btn btn-primary btn-sm" onclick="triageAssign(' + issue.number + ', this)">Assign</button>'
+      + '<button class="btn btn-ghost btn-sm" onclick="triageSkip(' + issue.number + ', this)">Skip</button>'
+      + '</div>';
+
+    container.appendChild(row);
+  });
+}
+
+async function triageAssign(num, btn) {
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>';
+  await fetch('/triage/assign', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ number: num })
+  });
+  // Remove row with animation
+  const row = $('triage-' + num);
+  if (row) { row.style.opacity = '0'; row.style.transition = 'opacity 0.2s'; setTimeout(() => { row.remove(); updateTriageCount(); }, 200); }
+  else fetchTriage();
+}
+
+async function triageSkip(num, btn) {
+  btn.disabled = true;
+  btn.textContent = '...';
+  await fetch('/triage/skip', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ number: num })
+  });
+  const row = $('triage-' + num);
+  if (row) { row.style.opacity = '0'; row.style.transition = 'opacity 0.2s'; setTimeout(() => { row.remove(); updateTriageCount(); }, 200); }
+  else fetchTriage();
+}
+
+function updateTriageCount() {
+  const container = $('triage-list');
+  const remaining = container.querySelectorAll('.triage-row').length;
+  $('triage-count').textContent = remaining > 0 ? remaining + ' issues' : '';
+  if (remaining === 0) $('triage-section').style.display = 'none';
+}
 
 // -- Approve / Reject --
 async function approveIssue(epicId, index) {
@@ -830,9 +980,11 @@ function refreshTimes() {
 // -- Init --
 setInterval(poll, 1500);
 setInterval(fetchEpics, 5000);
+setInterval(fetchTriage, 10000);
 setInterval(refreshTimes, 5000);
 poll();
 fetchEpics();
+fetchTriage();
 </script>
 </body>
 </html>
