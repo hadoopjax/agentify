@@ -78,22 +78,21 @@ agentify run
 
 agentify loads `.env` from the repo directory (or `~/.agentify.env` as a fallback). Add `.env` to your `.gitignore`.
 
-### Run in Colima
+### Run in Docker / Colima
 
 ```bash
 git clone https://github.com/hadoopjax/agentify.git
-docker build -t agentify ./agentify
-
 cd your-repo
-# Make sure .env exists with your keys
 
-docker run --rm -it \
-  -v "$(pwd)":/repo \
-  -v ~/.config/gh:/root/.config/gh:ro \
-  -v ~/.gitconfig:/root/.gitconfig:ro \
-  -p 4242:4242 \
-  agentify run
+# Add your keys
+echo "OPENAI_API_KEY=sk-..." >> .env
+echo "ANTHROPIC_API_KEY=sk-ant-..." >> .env
+
+# Start (builds image on first run)
+/path/to/agentify/start.sh
 ```
+
+`start.sh` builds the image if needed, mounts your repo + git config, loads `.env`, and starts the loop with dashboard.
 
 Dashboard at `http://localhost:4242`. With Tailscale, accessible from any device on your tailnet.
 
