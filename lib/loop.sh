@@ -22,6 +22,8 @@ POLL_INTERVAL="${POLL_INTERVAL:-60}"
 MAX_RUNS="${MAX_RUNS:-0}"
 MAX_CONCURRENT="${MAX_CONCURRENT:-3}"
 PAUSE_ON_QUOTA_SECONDS="${PAUSE_ON_QUOTA_SECONDS:-1800}"
+CODEX_PROGRESS_TIMEOUT_SECONDS="${CODEX_PROGRESS_TIMEOUT_SECONDS:-600}"
+CODEX_ABSOLUTE_TIMEOUT_SECONDS="${CODEX_ABSOLUTE_TIMEOUT_SECONDS:-0}"
 CODEX_MODEL="${CODEX_MODEL:-gpt-5.4}"
 CODEX_EFFORT="${CODEX_EFFORT:-high}"
 CLAUDE_MODEL="${CLAUDE_MODEL:-claude-opus-4-6}"
@@ -279,6 +281,69 @@ wait_for_ci() {
   return 0
 }
 
+worktree_change_count() {
+  local workdir="$1"
+  (
+    cd "$workdir" && {
+      git diff --name-only
+      git diff --cached --name-only
+      git ls-files --others --exclude-standard
+    } | awk 'NF {count++} END {print count+0}'
+  ) 2>/dev/null
+}
+
+run_codex_with_watchdog() {
+  local workdir="$1" prompt="$2" logfile="$3"
+  local start_ts last_activity_ts now_ts elapsed total_elapsed pid
+  local last_log_size current_log_size last_change_count current_change_count
+
+  (
+    cd "$workdir" && \
+      codex exec --full-auto --model "$CODEX_MODEL" -c model_reasoning_effort="$CODEX_EFFORT" "$prompt"
+  ) >> "$logfile" 2>&1 &
+  pid=$!
+  start_ts=$(date +%s)
+  last_activity_ts="$start_ts"
+  last_log_size=$(wc -c < "$logfile" 2>/dev/null || echo 0)
+  last_change_count=$(worktree_change_count "$workdir")
+
+  while kill -0 "$pid" 2>/dev/null; do
+    now_ts=$(date +%s)
+    current_log_size=$(wc -c < "$logfile" 2>/dev/null || echo 0)
+    current_change_count=$(worktree_change_count "$workdir")
+
+    if [ "$current_log_size" != "$last_log_size" ] || [ "$current_change_count" != "$last_change_count" ]; then
+      last_activity_ts="$now_ts"
+      last_log_size="$current_log_size"
+      last_change_count="$current_change_count"
+    fi
+
+    elapsed=$((now_ts - last_activity_ts))
+    total_elapsed=$((now_ts - start_ts))
+
+    if [ "${CODEX_ABSOLUTE_TIMEOUT_SECONDS:-0}" -gt 0 ] && [ "$total_elapsed" -ge "$CODEX_ABSOLUTE_TIMEOUT_SECONDS" ]; then
+      write_worker_log "$logfile" "Codex hit absolute timeout after ${CODEX_ABSOLUTE_TIMEOUT_SECONDS}s"
+      kill "$pid" 2>/dev/null || true
+      sleep 2
+      kill -9 "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+
+    if [ "$elapsed" -ge "$CODEX_PROGRESS_TIMEOUT_SECONDS" ]; then
+      write_worker_log "$logfile" "Codex stalled with no log or file-change progress for ${CODEX_PROGRESS_TIMEOUT_SECONDS}s"
+      kill "$pid" 2>/dev/null || true
+      sleep 2
+      kill -9 "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 125
+    fi
+    sleep 5
+  done
+
+  wait "$pid"
+}
+
 # ============================================================
 # Worker — handles one issue end-to-end in its own worktree
 # Runs as a background process, one per issue
@@ -330,13 +395,33 @@ work_issue() {
   wlog "$num" "${C_TEAL}Codex coding..."
   emit "coding_start" "[#$num] Codex working on: $title"
   write_worker_log "$worker_log" "Starting Codex coding pass"
+  write_worker_log "$worker_log" "Codex progress watchdog: ${CODEX_PROGRESS_TIMEOUT_SECONDS}s of inactivity"
+  if [ "${CODEX_ABSOLUTE_TIMEOUT_SECONDS:-0}" -gt 0 ]; then
+    write_worker_log "$worker_log" "Codex absolute ceiling: ${CODEX_ABSOLUTE_TIMEOUT_SECONDS}s"
+  fi
 
   local code_prompt
   code_prompt=$(render_prompt "code.md")
 
-  if ! (cd "$wt_path" && codex exec --full-auto --model "$CODEX_MODEL" -c model_reasoning_effort="$CODEX_EFFORT" "$code_prompt") >> "$worker_log" 2>&1; then
+  local codex_status=0
+  if run_codex_with_watchdog "$wt_path" "$code_prompt" "$worker_log"; then
+    codex_status=0
+  else
+    codex_status=$?
+  fi
+  if [ "$codex_status" -ne 0 ]; then
     wlog "$num" "${C_RED}Codex failed"
-    write_worker_log "$worker_log" "Codex coding pass failed"
+    if [ "$codex_status" -eq 124 ]; then
+      wlog "$num" "${C_YELLOW}Codex hit absolute ceiling"
+      write_worker_log "$worker_log" "Codex coding pass hit absolute ceiling"
+      emit "timeout" "[#$num] Codex hit absolute ceiling"
+    elif [ "$codex_status" -eq 125 ]; then
+      wlog "$num" "${C_YELLOW}Codex stalled"
+      write_worker_log "$worker_log" "Codex coding pass stalled"
+      emit "stalled" "[#$num] Codex stalled with no progress for ${CODEX_PROGRESS_TIMEOUT_SECONDS}s"
+    else
+      write_worker_log "$worker_log" "Codex coding pass failed"
+    fi
     if worker_log_has_quota_error "$worker_log"; then
       wlog "$num" "${C_YELLOW}Pausing new work for quota exhaustion"
       pause_dispatch_for_quota "$num" "$title" "$worker_log"
@@ -448,7 +533,19 @@ $review" > /dev/null 2>&1 || true
   local retry_prompt
   retry_prompt=$(render_prompt "retry.md")
 
-  (cd "$wt_path" && codex exec --full-auto --model "$CODEX_MODEL" -c model_reasoning_effort="$CODEX_EFFORT" "$retry_prompt") >> "$worker_log" 2>&1 || true
+  write_worker_log "$worker_log" "Starting Codex retry pass with ${CODEX_PROGRESS_TIMEOUT_SECONDS}s inactivity watchdog"
+  if run_codex_with_watchdog "$wt_path" "$retry_prompt" "$worker_log"; then
+    codex_status=0
+  else
+    codex_status=$?
+  fi
+  if [ "$codex_status" -eq 124 ]; then
+    write_worker_log "$worker_log" "Codex retry pass hit absolute ceiling"
+    emit "timeout" "[#$num] Codex retry hit absolute ceiling"
+  elif [ "$codex_status" -eq 125 ]; then
+    write_worker_log "$worker_log" "Codex retry pass stalled"
+    emit "stalled" "[#$num] Codex retry stalled with no progress for ${CODEX_PROGRESS_TIMEOUT_SECONDS}s"
+  fi
 
   if (cd "$wt_path" && (! git diff --quiet || ! git diff --cached --quiet || \
      [ -n "$(git ls-files --others --exclude-standard)" ])); then

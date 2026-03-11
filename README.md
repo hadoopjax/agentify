@@ -76,6 +76,9 @@ Point agentify at a repo with existing issues:
 - Quota and billing failures pause new Codex dispatch globally instead of hammering the same issues.
 - The pause window is stored in `.agentify/state.json`, survives restarts, and the dashboard shows the pause reason and retry time.
 - Once the pause expires, any recovered `agent` issues are eligible for dispatch again automatically.
+- Long-running work is governed by an inactivity watchdog, not a "must finish by X minutes" rule.
+- The worker is allowed to keep running as long as its log is advancing or the worktree is changing.
+- A hard absolute ceiling is optional, disabled by default, and intended only as an explicit operator override.
 
 ## Setup
 
