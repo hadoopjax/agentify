@@ -17,6 +17,7 @@ EVENTS_FILE="$AGENTIFY_DIR/events.jsonl"
 STATE_FILE="$AGENTIFY_DIR/state.json"
 WORKERS_DIR="$AGENTIFY_DIR/workers"
 WORKTREE_DIR="$AGENTIFY_DIR/worktrees"
+LOGS_DIR="$AGENTIFY_DIR/logs"
 POLL_INTERVAL="${POLL_INTERVAL:-60}"
 MAX_RUNS="${MAX_RUNS:-0}"
 MAX_CONCURRENT="${MAX_CONCURRENT:-3}"
@@ -78,6 +79,17 @@ set_worker() {
 remove_worker() {
   local num="$1"
   rm -f "$WORKERS_DIR/$num.json" "$WORKERS_DIR/$num.pid"
+}
+
+worker_log_file() {
+  local num="$1"
+  echo "$LOGS_DIR/$num.log"
+}
+
+write_worker_log() {
+  local logfile="$1"
+  shift
+  printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$logfile"
 }
 
 # -- Worker management --
@@ -198,12 +210,17 @@ work_issue() {
   ISSUE_BODY="$body"
 
   local branch="agent/issue-$num"
+  local worker_log
+  worker_log=$(worker_log_file "$num")
+  : > "$worker_log"
+  write_worker_log "$worker_log" "Worker started for #$num $title"
 
   # Init worker state
   set_worker "$num" "phase" "coding"
   set_worker "$num" "issue" "$num"
   set_worker "$num" "title" "$title"
   set_worker "$num" "branch" "$branch"
+  set_worker "$num" "log_file" "$worker_log"
 
   # Claim: swap labels so dispatcher won't re-pick
   gh issue edit "$num" --remove-label "agent" --add-label "agent-wip" > /dev/null 2>&1 || true
@@ -213,6 +230,7 @@ work_issue() {
   local wt_path
   if ! wt_path=$(create_worktree "$branch"); then
     wlog "$num" "${C_RED}Worktree setup failed"
+    write_worker_log "$worker_log" "Worktree setup failed"
     emit "error" "[#$num] Worktree setup failed"
     increment_global "errors"
     gh issue edit "$num" --remove-label "agent-wip" --add-label "agent" > /dev/null 2>&1 || true
@@ -221,16 +239,19 @@ work_issue() {
   fi
   set_worker "$num" "worktree" "$wt_path"
   wlog "$num" "${C_DIM}worktree: $wt_path"
+  write_worker_log "$worker_log" "Worktree ready at $wt_path"
 
   # ---- Code ----
   wlog "$num" "${C_TEAL}Codex coding..."
   emit "coding_start" "[#$num] Codex working on: $title"
+  write_worker_log "$worker_log" "Starting Codex coding pass"
 
   local code_prompt
   code_prompt=$(render_prompt "code.md")
 
-  if ! (cd "$wt_path" && codex exec --full-auto --model "$CODEX_MODEL" -c model_reasoning_effort="$CODEX_EFFORT" "$code_prompt") 2>/dev/null; then
+  if ! (cd "$wt_path" && codex exec --full-auto --model "$CODEX_MODEL" -c model_reasoning_effort="$CODEX_EFFORT" "$code_prompt") >> "$worker_log" 2>&1; then
     wlog "$num" "${C_RED}Codex failed"
+    write_worker_log "$worker_log" "Codex coding pass failed"
     emit "error" "[#$num] Codex failed"
     increment_global "errors"
     cleanup_worktree "$branch"
@@ -243,6 +264,7 @@ work_issue() {
   if (cd "$wt_path" && git diff --quiet && git diff --cached --quiet && \
      [ -z "$(git ls-files --others --exclude-standard)" ]); then
     wlog "$num" "${C_YELLOW}No changes produced"
+    write_worker_log "$worker_log" "Codex produced no file changes"
     emit "coding_done" "[#$num] No changes — needs more detail"
     gh issue comment "$num" --body "🤖 Couldn't produce changes. May need a more detailed description." > /dev/null 2>&1 || true
     cleanup_worktree "$branch"
@@ -255,6 +277,7 @@ work_issue() {
   (cd "$wt_path" && git add -A && git commit -q -m "fix: #$num $title")
   (cd "$wt_path" && git push -u origin HEAD -q) 2>/dev/null
   wlog "$num" "${C_TEAL}Changes pushed"
+  write_worker_log "$worker_log" "Changes committed and pushed on $branch"
   emit "coding_done" "[#$num] Changes pushed to $branch"
 
   # ---- PR ----
@@ -269,6 +292,7 @@ work_issue() {
     --head "$branch" 2>/dev/null)
 
   wlog "$num" "PR: $pr_url"
+  write_worker_log "$worker_log" "Opened PR $pr_url"
   emit "pr_created" "[#$num] $pr_url"
 
   # ---- CI ----
@@ -276,6 +300,7 @@ work_issue() {
   sleep 5
   if ! wait_for_ci "$pr_url" "$num"; then
     wlog "$num" "${C_RED}CI failed"
+    write_worker_log "$worker_log" "CI failed for $pr_url"
     emit "ci_failed" "[#$num] CI failed"
     gh pr comment "$pr_url" --body "🤖 CI failed. Leaving PR open." > /dev/null 2>&1 || true
     local wt_clean="$WORKTREE_DIR/$branch"
@@ -284,10 +309,12 @@ work_issue() {
     return 1
   fi
   emit "ci_passed" "[#$num] CI passed"
+  write_worker_log "$worker_log" "CI passed"
 
   # ---- Review ----
   set_worker "$num" "phase" "reviewing"
   wlog "$num" "${C_CORAL}Claude reviewing..."
+  write_worker_log "$worker_log" "Claude review started"
   emit "review_start" "[#$num] Claude reviewing"
 
   ISSUE_DIFF=$(gh pr diff "$pr_url")
@@ -297,6 +324,7 @@ work_issue() {
 
   if echo "$review" | grep -q "LGTM"; then
     wlog "$num" "${C_GREEN}LGTM ✓"
+    write_worker_log "$worker_log" "Claude review result: LGTM"
     emit "review_done" "[#$num] LGTM ✅"
     gh pr comment "$pr_url" --body "🤖 **Claude: LGTM** ✅" > /dev/null 2>&1 || true
 
@@ -305,6 +333,7 @@ work_issue() {
       gh pr merge "$pr_url" --squash --auto --delete-branch 2>/dev/null
 
     wlog "$num" "${C_GREEN}Merged!"
+    write_worker_log "$worker_log" "PR merged successfully"
     emit "pr_merged" "[#$num] Merged"
     increment_global "completed"
 
@@ -317,6 +346,7 @@ work_issue() {
 
   # ---- Retry with feedback ----
   wlog "$num" "${C_CORAL}Changes requested — retrying"
+  write_worker_log "$worker_log" "Claude requested changes; retrying"
   emit "review_done" "[#$num] Changes requested"
   gh pr comment "$pr_url" --body "🤖 **Review:**
 
@@ -329,7 +359,7 @@ $review" > /dev/null 2>&1 || true
   local retry_prompt
   retry_prompt=$(render_prompt "retry.md")
 
-  (cd "$wt_path" && codex exec --full-auto --model "$CODEX_MODEL" -c model_reasoning_effort="$CODEX_EFFORT" "$retry_prompt") 2>/dev/null || true
+  (cd "$wt_path" && codex exec --full-auto --model "$CODEX_MODEL" -c model_reasoning_effort="$CODEX_EFFORT" "$retry_prompt") >> "$worker_log" 2>&1 || true
 
   if (cd "$wt_path" && (! git diff --quiet || ! git diff --cached --quiet || \
      [ -n "$(git ls-files --others --exclude-standard)" ])); then
@@ -343,6 +373,7 @@ $review" > /dev/null 2>&1 || true
 
     if echo "$review" | grep -q "LGTM"; then
       wlog "$num" "${C_GREEN}LGTM on retry ✓"
+      write_worker_log "$worker_log" "Claude review result after retry: LGTM"
       emit "review_done" "[#$num] LGTM on retry ✅"
       gh pr comment "$pr_url" --body "🤖 **Claude: LGTM** ✅" > /dev/null 2>&1 || true
 
@@ -351,6 +382,7 @@ $review" > /dev/null 2>&1 || true
         gh pr merge "$pr_url" --squash --auto --delete-branch 2>/dev/null
 
       wlog "$num" "${C_GREEN}Merged after retry!"
+      write_worker_log "$worker_log" "PR merged after retry"
       emit "pr_merged" "[#$num] Merged after retry"
       increment_global "completed"
 
@@ -364,6 +396,7 @@ $review" > /dev/null 2>&1 || true
 
   # Give up — leave PR open for human
   wlog "$num" "${C_CORAL}Still needs work. Leaving PR open."
+  write_worker_log "$worker_log" "Review still failing after retry; leaving PR open"
   emit "review_done" "[#$num] Still needs work after retry"
   gh pr comment "$pr_url" --body "🤖 **Still needs work:**
 
@@ -379,7 +412,7 @@ $review" > /dev/null 2>&1 || true
 # Dispatcher — manages concurrency, spawns workers
 # ============================================================
 init_run() {
-  mkdir -p "$AGENTIFY_DIR" "$WORKERS_DIR" "$WORKTREE_DIR"
+  mkdir -p "$AGENTIFY_DIR" "$WORKERS_DIR" "$WORKTREE_DIR" "$LOGS_DIR"
   echo '{"completed":"0","errors":"0"}' > "$STATE_FILE"
   : > "$EVENTS_FILE"
   # Clean stale worker state from previous runs

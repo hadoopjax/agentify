@@ -34,6 +34,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._serve_state()
         elif self.path.startswith("/events"):
             self._serve_events()
+        elif self.path.startswith("/worker-log"):
+            self._serve_worker_log()
         elif self.path == "/epics":
             self._serve_epics()
         elif self.path == "/triage":
@@ -135,6 +137,36 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     except (json.JSONDecodeError, FileNotFoundError):
                         pass
         self._json_response({"epics": epics})
+
+    def _serve_worker_log(self):
+        issue = None
+        if "?" in self.path:
+            for param in self.path.split("?", 1)[1].split("&"):
+                if "=" in param:
+                    k, v = param.split("=", 1)
+                    if k == "issue":
+                        issue = v
+                        break
+
+        if not issue or not issue.isdigit():
+            self._json_response({"error": "Missing issue"}, 400)
+            return
+
+        log_file = os.path.join(DATA_DIR, "logs", f"{issue}.log")
+        try:
+            with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+        except FileNotFoundError:
+            self._json_response({"issue": int(issue), "exists": False, "content": ""})
+            return
+
+        content = "".join(lines[-300:])
+        self._json_response({
+            "issue": int(issue),
+            "exists": True,
+            "content": content,
+            "line_count": len(lines),
+        })
 
     def _reserved_existing_issue_numbers(self):
         reserved = set()

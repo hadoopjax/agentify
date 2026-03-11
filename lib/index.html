@@ -163,6 +163,20 @@
     margin-right: 6px;
   }
 
+  .run-item-btn {
+    border: none;
+    background: transparent;
+    text-align: left;
+    padding: 0;
+    cursor: pointer;
+    color: inherit;
+    font: inherit;
+  }
+
+  .run-item-btn:hover {
+    color: var(--teal);
+  }
+
   .run-empty {
     font-size: 12px;
     color: var(--text-tertiary);
@@ -396,6 +410,14 @@
     gap: 16px;
   }
 
+  .worker-clickable {
+    cursor: pointer;
+  }
+
+  .worker-clickable:hover {
+    box-shadow: var(--shadow-lg);
+  }
+
   .worker-icon {
     width: 36px; height: 36px;
     border-radius: 10px;
@@ -490,6 +512,86 @@
     overscroll-behavior: contain;
   }
   .timeline-card::-webkit-scrollbar { width: 0; }
+
+  .log-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(14, 23, 24, 0.45);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    z-index: 30;
+  }
+
+  .log-modal.open {
+    display: flex;
+  }
+
+  .log-panel {
+    width: min(960px, 100%);
+    max-height: min(82vh, 860px);
+    background: #102021;
+    color: #D8F1EF;
+    border-radius: 18px;
+    box-shadow: 0 18px 60px rgba(0,0,0,0.28);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .log-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 16px 18px;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+  }
+
+  .log-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: white;
+  }
+
+  .log-subtitle {
+    font-size: 11px;
+    color: #8DB8B4;
+    margin-top: 4px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+
+  .log-close {
+    background: transparent;
+    color: #8DB8B4;
+    border: none;
+    font-size: 22px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 4px 8px;
+  }
+
+  .log-body {
+    padding: 0;
+    overflow: auto;
+    background: #102021;
+  }
+
+  .log-pre {
+    margin: 0;
+    padding: 18px;
+    min-height: 240px;
+    font-size: 12px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  }
+
+  .log-empty {
+    color: #8DB8B4;
+  }
 
   .ev-row {
     display: flex;
@@ -708,6 +810,21 @@
     </div>
   </div>
 
+  <div class="log-modal" id="log-modal">
+    <div class="log-panel">
+      <div class="log-head">
+        <div>
+          <div class="log-title" id="log-title">Worker Log</div>
+          <div class="log-subtitle" id="log-subtitle">Waiting for selection</div>
+        </div>
+        <button class="log-close" id="log-close" aria-label="Close">×</button>
+      </div>
+      <div class="log-body">
+        <pre class="log-pre" id="log-pre">Select a running issue to view live Codex logs.</pre>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <script>
@@ -720,6 +837,8 @@ let grouping = false;
 let latestEvent = null;
 let currentWorkersCache = {};
 let currentQueueCache = [];
+let selectedLogIssue = null;
+let logPollTimer = null;
 
 const phaseLabel = {
   idle:'Idle', starting:'Starting', coding:'Coding',
@@ -766,6 +885,47 @@ function uptime() {
 
 function $(id) { return document.getElementById(id); }
 
+function openWorkerLog(issue, title) {
+  selectedLogIssue = String(issue);
+  $('log-title').textContent = '#' + issue + ' ' + (title || 'Worker Log');
+  $('log-subtitle').textContent = 'Live Codex output';
+  $('log-pre').textContent = 'Loading live log...';
+  $('log-modal').classList.add('open');
+  fetchWorkerLog();
+  if (logPollTimer) clearInterval(logPollTimer);
+  logPollTimer = setInterval(fetchWorkerLog, 2000);
+}
+
+function closeWorkerLog() {
+  $('log-modal').classList.remove('open');
+  selectedLogIssue = null;
+  if (logPollTimer) {
+    clearInterval(logPollTimer);
+    logPollTimer = null;
+  }
+}
+
+async function fetchWorkerLog() {
+  if (!selectedLogIssue) return;
+  try {
+    const res = await fetch('/worker-log?issue=' + encodeURIComponent(selectedLogIssue));
+    const data = await res.json();
+    const pre = $('log-pre');
+    if (!data.exists) {
+      pre.textContent = 'No live log file yet for #' + selectedLogIssue + '.';
+      pre.className = 'log-pre log-empty';
+      return;
+    }
+    pre.textContent = data.content || 'Log file is empty.';
+    pre.className = 'log-pre';
+    const body = pre.parentElement;
+    body.scrollTop = body.scrollHeight;
+  } catch (e) {
+    $('log-pre').textContent = 'Failed to load log.';
+    $('log-pre').className = 'log-pre log-empty';
+  }
+}
+
 function renderRunSummary(state = {}) {
   const workers = Object.entries(state.workers || {});
   const queued = state.queued_issues || [];
@@ -781,7 +941,7 @@ function renderRunSummary(state = {}) {
       .sort((a, b) => Number(a[0]) - Number(b[0]))
       .map(([num, worker]) => {
         const phase = phaseLabel[worker.phase || 'idle'] || (worker.phase || 'idle');
-        return '<div class="run-item"><strong>#' + esc(num) + '</strong>' + esc(worker.title || '') + ' · ' + esc(phase) + '</div>';
+        return '<button class="run-item run-item-btn" onclick="openWorkerLog(' + Number(num) + ', ' + JSON.stringify(worker.title || '') + ')"><strong>#' + esc(num) + '</strong>' + esc(worker.title || '') + ' · ' + esc(phase) + '</button>';
       })
       .join('');
   }
@@ -1144,13 +1304,14 @@ function updateWorkers(workers) {
 
     if (isNew) {
       card = document.createElement('div');
-      card.className = 'card';
+      card.className = 'card worker-clickable';
       card.dataset.wk = num;
       card.setAttribute('data-new', '');
       container.appendChild(card);
       // Remove animation attr after it plays
       card.addEventListener('animationend', () => card.removeAttribute('data-new'), { once: true });
     }
+    card.onclick = () => openWorkerLog(num, w.title || '');
 
     // Update contents only if changed
     const title = w.title ? '#' + num + ' ' + w.title : '#' + num;
@@ -1242,6 +1403,14 @@ setInterval(refreshTimes, 5000);
 poll();
 fetchEpics();
 fetchTriage();
+
+$('log-close').addEventListener('click', closeWorkerLog);
+$('log-modal').addEventListener('click', e => {
+  if (e.target === $('log-modal')) closeWorkerLog();
+});
+window.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeWorkerLog();
+});
 </script>
 </body>
 </html>
