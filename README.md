@@ -69,6 +69,14 @@ Point agentify at a repo with existing issues:
 8. Merges on approval, cleans up, picks next issue
 9. When all epic issues close, marks epic complete
 
+### Failure recovery
+
+- `agent-wip` means the issue is actively owned by a live worker, not permanently removed from the queue.
+- If a worker disappears and an issue is left in `agent-wip` without a live worker PID, the loop automatically re-queues it back to `agent` during normal polling. Recovery is not limited to process startup.
+- Quota and billing failures pause new Codex dispatch globally instead of hammering the same issues.
+- The pause window is stored in `.agentify/state.json`, survives restarts, and the dashboard shows the pause reason and retry time.
+- Once the pause expires, any recovered `agent` issues are eligible for dispatch again automatically.
+
 ## Setup
 
 ### Run locally
@@ -177,6 +185,8 @@ How that materializes here:
 - `.agentify/state.json`, `.agentify/events.jsonl`, `.agentify/workers/`, and
   `.agentify/epics/` are the durable state machine. If the process restarts, the
   repo still contains the run state.
+- Quota pause state also lives in `.agentify/state.json`, so temporary budget
+  exhaustion becomes a resumable control state rather than a silent failure.
 - `git worktree` usage in `lib/loop.sh` makes git itself part of the execution
   model: each issue gets an isolated branch and worktree instead of mutating the
   user's checkout directly.
@@ -226,6 +236,8 @@ How that materializes here:
   of that queue in a controlled way.
 - `lib/loop.sh` claims issues by swapping `agent` to `agent-wip`, then opens PRs,
   waits for CI, requests review, retries once, and merges.
+- `lib/loop.sh` also reconciles orphaned `agent-wip` issues back into `agent`
+  during normal polling, so queue state self-heals instead of relying on restarts.
 - `check_epic_completion` and `advance_existing_issue_epics` in `lib/planner.sh`
   turn epic progress into explicit workflow transitions instead of informal notes.
 

@@ -517,7 +517,8 @@ init_run() {
   rm -f "$WORKERS_DIR"/*.json "$WORKERS_DIR"/*.pid 2>/dev/null
 }
 
-recover_stale_wip_issues() {
+recover_orphaned_wip_issues() {
+  local source="${1:-runtime}"
   local issues_json count
   issues_json=$(gh issue list --label agent-wip --state open --limit 100 --json number,title 2>/dev/null || echo '[]')
   count=$(echo "$issues_json" | jq 'length' 2>/dev/null || echo 0)
@@ -532,8 +533,12 @@ recover_stale_wip_issues() {
     num=$(echo "$issue" | jq -r '.number')
     title=$(echo "$issue" | jq -r '.title')
 
+    if is_issue_claimed "$num"; then
+      continue
+    fi
+
     gh issue edit "$num" --remove-label "agent-wip" --add-label "agent" 2>/dev/null || continue
-    emit "requeued" "[#$num] Re-queued stale agent-wip issue: $title"
+    emit "requeued" "[#$num] Re-queued orphaned agent-wip issue ($source): $title"
   done
 }
 
@@ -543,7 +548,7 @@ main_loop() {
 
   init_run
   set_state "repo" "$repo"
-  recover_stale_wip_issues
+  recover_orphaned_wip_issues "startup"
 
   printf "\n  ${C_TEAL}${C_BOLD}agentify${C_RESET} ${C_DIM}◉${C_RESET} running\n"
   printf "  ${C_DIM}├─${C_RESET} repo: ${C_BOLD}$repo${C_RESET}\n"
@@ -569,6 +574,7 @@ main_loop() {
 
     # Reap finished workers
     reap_workers
+    recover_orphaned_wip_issues "runtime"
 
     resume_pause_if_expired || true
 
