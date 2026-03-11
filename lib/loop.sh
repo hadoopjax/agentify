@@ -151,6 +151,66 @@ pause_dispatch_for_quota() {
   write_worker_log "$worker_log" "Global dispatch paused for $PAUSE_ON_QUOTA_SECONDS seconds due to quota or billing failure"
 }
 
+ensure_label_exists() {
+  local name="$1" description="$2" color="$3"
+  gh label list 2>/dev/null | grep -q "^${name}[[:space:]]" && return 0
+  gh label create "$name" --description "$description" --color "$color" > /dev/null 2>&1 || true
+}
+
+find_blocker_issue_number() {
+  local signature="$1"
+  gh issue list --state open --search "\"agentify-blocker:${signature}\" in:body" --limit 1 --json number -q '.[0].number // ""' 2>/dev/null || true
+}
+
+create_blocker_issue() {
+  local signature="$1" title="$2" body="$3"
+  ensure_label_exists "agent-blocker" "Systemic blocker discovered by agentify" "B60205"
+  gh issue create --title "$title" --label "agent-blocker" --body "$body" 2>/dev/null
+}
+
+report_repo_blocker_if_needed() {
+  local num="$1" issue_title="$2" worker_log="$3"
+  [ -f "$worker_log" ] || return 0
+
+  local signature blocker_title evidence existing_number body
+
+  if grep -Eiq 'not runnable in this workspace because it hardcodes .*/Users/[^ ]+.*references a missing `?test_api\.py`?' "$worker_log"; then
+    signature="repo-test-runner-nonportable"
+    blocker_title="Fix non-portable backend test runner"
+    evidence=$(grep -Ei 'backend/run_tests\.sh|not runnable in this workspace because it hardcodes|missing `?test_api\.py`?' "$worker_log" | tail -n 6)
+    existing_number=$(find_blocker_issue_number "$signature")
+    [ -n "$existing_number" ] && return 0
+
+    body=$(cat <<EOF
+Agentify detected a systemic repo blocker while working issue #$num: $issue_title.
+
+The agent could complete targeted validation, but the repo's advertised backend test runner is not portable in this workspace.
+
+Observed evidence:
+
+\`\`\`
+$evidence
+\`\`\`
+
+Expected:
+- the documented backend test runner should be runnable from a normal repo checkout
+- it should not hardcode another developer's home directory
+- it should not reference missing test entrypoints
+
+Discovered from:
+- issue #$num
+
+<!-- agentify-blocker:$signature -->
+EOF
+)
+
+    if create_blocker_issue "$signature" "$blocker_title" "$body" > /dev/null; then
+      emit "blocker_created" "[#$num] Created blocker issue: $blocker_title"
+      write_worker_log "$worker_log" "Created blocker issue for signature $signature"
+    fi
+  fi
+}
+
 # -- Per-worker state (no lock needed, one writer per file) --
 set_worker() {
   local num="$1" key="$2" val="$3"
@@ -489,6 +549,7 @@ work_issue() {
 
   # Check for changes
   unique_commit_count=$(worktree_unique_commit_count "$wt_path")
+  report_repo_blocker_if_needed "$num" "$title" "$worker_log"
 
   if ! worktree_has_uncommitted_changes "$wt_path" && [ "${unique_commit_count:-0}" -eq 0 ]; then
     wlog "$num" "${C_YELLOW}No changes produced"
@@ -634,6 +695,7 @@ $review" > /dev/null 2>&1 || true
     write_worker_log "$worker_log" "Codex retry pass stalled"
     emit "stalled" "[#$num] Codex retry stalled with no progress for ${CODEX_PROGRESS_TIMEOUT_SECONDS}s"
   fi
+  report_repo_blocker_if_needed "$num" "$title" "$worker_log"
 
   if (cd "$wt_path" && (! git diff --quiet || ! git diff --cached --quiet || \
      [ -n "$(git ls-files --others --exclude-standard)" ])); then

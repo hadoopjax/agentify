@@ -79,6 +79,8 @@ Point agentify at a repo with existing issues:
 - Long-running work is governed by an inactivity watchdog, not a "must finish by X minutes" rule.
 - The worker is allowed to keep running as long as its log is advancing or the worktree is changing.
 - A hard absolute ceiling is optional, disabled by default, and intended only as an explicit operator override.
+- High-confidence systemic repo blockers can be captured as deduplicated `agent-blocker` issues.
+- This is intentionally narrow: agentify should create blocker issues for durable repo problems like broken test harnesses, not for ordinary task-local implementation failures.
 
 ## Setup
 

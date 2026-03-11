@@ -48,6 +48,10 @@ load_env_file() {
 # Load agent-only environment without touching the app's .env.
 [ -f "$AGENT_ENV_FILE" ] && load_env_file "$AGENT_ENV_FILE"
 
+if [ -z "${GIT_CONFIG_GLOBAL:-}" ] && [ -d "${HOME}/.gitconfig" ]; then
+  export GIT_CONFIG_GLOBAL=/dev/null
+fi
+
 # Colors
 C_RESET="\033[0m"
 C_DIM="\033[2m"
