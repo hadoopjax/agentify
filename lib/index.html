@@ -867,11 +867,15 @@ let logPollTimer = null;
 const phaseLabel = {
   idle:'Idle', starting:'Starting', coding:'Coding',
   reviewing:'Reviewing', retrying:'Retrying',
-  pr:'Opening PR', ci:'CI Checks', merging:'Merging'
+  pr:'Opening PR', pushing:'Pushing',
+  ci:'CI Checks', ci_failed:'CI Failed',
+  merging:'Merging', merge_blocked:'Merge Blocked',
+  human_review:'Needs Human Review'
 };
 
 const phaseIcon = {
-  coding:'C', reviewing:'R', retrying:'!', pr:'PR', ci:'CI', merging:'M',
+  coding:'C', reviewing:'R', retrying:'!', pr:'PR', pushing:'↑', ci:'CI', ci_failed:'CI',
+  merging:'M', merge_blocked:'!', human_review:'H',
   idle:'~', starting:'...'
 };
 
@@ -882,6 +886,7 @@ const evColor = {
   pr_created:'var(--violet)', pr_merged:'var(--teal)',
   ci_waiting:'var(--violet)', ci_passed:'var(--teal)', ci_failed:'var(--coral)',
   error:'var(--coral)', idle:'var(--sand)', retry:'var(--sand)',
+  merge_blocked:'var(--coral)',
   loop_end:'var(--teal)', plan_start:'var(--violet)', plan_done:'var(--violet)',
   plan_claude:'var(--coral)', plan_gpt:'var(--sand)',
   epic_complete:'var(--teal)', issue_approved:'var(--teal)',
@@ -974,17 +979,18 @@ function formatRemaining(seconds) {
 
 function renderRunSummary(state = {}) {
   const workers = Object.entries(state.workers || {});
+  const runningWorkers = workers.filter(([, worker]) => worker.active);
   const queued = state.queued_issues || [];
   const pause = activePause(state);
 
-  $('run-active-count').textContent = String(workers.length);
+  $('run-active-count').textContent = String(runningWorkers.length);
   $('run-queue-count').textContent = String(queued.length);
 
   const activeList = $('run-active-list');
-  if (workers.length === 0) {
+  if (runningWorkers.length === 0) {
     activeList.innerHTML = '<div class="run-empty">No active workers.</div>';
   } else {
-    activeList.innerHTML = workers
+    activeList.innerHTML = runningWorkers
       .sort((a, b) => Number(a[0]) - Number(b[0]))
       .map(([num, worker]) => {
         const phase = phaseLabel[worker.phase || 'idle'] || (worker.phase || 'idle');
@@ -1331,6 +1337,7 @@ function esc(s) {
 function updateWorkers(workers, state = {}) {
   const container = $('workers');
   const entries = Object.entries(workers || {});
+  const activeEntries = entries.filter(([, w]) => w.active);
   const pill = $('pill');
   const beacon = $('beacon');
   const emptyEl = $('workers-empty');
@@ -1354,9 +1361,15 @@ function updateWorkers(workers, state = {}) {
   }
 
   if (emptyEl) emptyEl.style.display = 'none';
-  pill.textContent = entries.length + ' active';
-  pill.className = 'pill pill-active';
-  beacon.className = 'beacon on';
+  if (activeEntries.length > 0) {
+    pill.textContent = activeEntries.length + ' active';
+    pill.className = 'pill pill-active';
+    beacon.className = 'beacon on';
+  } else {
+    pill.textContent = 'recoverable';
+    pill.className = 'pill pill-idle';
+    beacon.className = 'beacon';
+  }
 
   const currentKeys = new Set(entries.map(([k]) => k));
 
@@ -1396,6 +1409,7 @@ function updateWorkers(workers, state = {}) {
       + '<div class="worker-title">' + esc(title) + '</div>'
       + (branch ? '<div class="worker-branch">' + esc(branch) + '</div>' : '')
       + '<div class="worker-meta">'
+      + '<span class="worker-chip">' + (w.active ? 'live' : 'paused') + '</span>'
       + '<span class="worker-chip">Issue #' + esc(num) + '</span>'
       + (w.worktree ? '<span class="worker-chip">' + esc(w.worktree) + '</span>' : '')
       + '</div>'

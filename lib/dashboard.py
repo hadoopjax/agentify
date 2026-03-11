@@ -89,9 +89,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if os.path.isdir(workers_dir):
             for fname in os.listdir(workers_dir):
                 if fname.endswith(".json"):
+                    issue_num = fname[:-5]
+                    pid_path = os.path.join(workers_dir, f"{issue_num}.pid")
+                    active = False
+                    if os.path.exists(pid_path):
+                        try:
+                            with open(pid_path) as pf:
+                                pid = int((pf.read() or "0").strip() or "0")
+                            os.kill(pid, 0)
+                            active = True
+                        except Exception:
+                            active = False
                     try:
                         with open(os.path.join(workers_dir, fname)) as f:
-                            workers[fname[:-5]] = json.load(f)
+                            worker = json.load(f)
+                            worker["active"] = active
+                            workers[issue_num] = worker
                     except (json.JSONDecodeError, FileNotFoundError):
                         pass
         state["workers"] = workers

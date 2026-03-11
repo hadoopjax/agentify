@@ -81,6 +81,8 @@ Point agentify at a repo with existing issues:
 - A hard absolute ceiling is optional, disabled by default, and intended only as an explicit operator override.
 - High-confidence systemic repo blockers can be captured as deduplicated `agent-blocker` issues.
 - This is intentionally narrow: agentify should create blocker issues for durable repo problems like broken test harnesses, not for ordinary task-local implementation failures.
+- Post-coding orchestration is phase-aware: `pushing`, `pr`, `ci`, `reviewing`, `retrying`, and `merging` survive worker death and restart from durable worker state instead of dropping back to raw coding.
+- If a PR is merge-blocked, agentify leaves it open, records the blocked state, and stops retry churn instead of silently re-queuing the issue.
 
 ## Setup
 

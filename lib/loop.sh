@@ -22,6 +22,7 @@ POLL_INTERVAL="${POLL_INTERVAL:-60}"
 MAX_RUNS="${MAX_RUNS:-0}"
 MAX_CONCURRENT="${MAX_CONCURRENT:-3}"
 PAUSE_ON_QUOTA_SECONDS="${PAUSE_ON_QUOTA_SECONDS:-1800}"
+PAUSE_ON_GITHUB_RATE_LIMIT_SECONDS="${PAUSE_ON_GITHUB_RATE_LIMIT_SECONDS:-900}"
 CODEX_PROGRESS_TIMEOUT_SECONDS="${CODEX_PROGRESS_TIMEOUT_SECONDS:-600}"
 CODEX_ABSOLUTE_TIMEOUT_SECONDS="${CODEX_ABSOLUTE_TIMEOUT_SECONDS:-0}"
 CODEX_MODEL="${CODEX_MODEL:-gpt-5.4}"
@@ -140,6 +141,12 @@ worker_log_has_quota_error() {
   grep -Eiq 'quota exceeded|insufficient_quota|check your plan and billing details|billing details|rate limit|rate_limit|429' "$logfile"
 }
 
+worker_log_has_github_rate_limit_error() {
+  local logfile="$1"
+  [ -f "$logfile" ] || return 1
+  grep -Eiq 'GraphQL: API rate limit|API rate limit already exceeded|secondary rate limit|rate limit exceeded for user ID|was submitted too quickly|abuse detection' "$logfile"
+}
+
 pause_dispatch_for_quota() {
   local num="$1" title="$2" worker_log="$3"
   local reason until_iso
@@ -149,6 +156,17 @@ pause_dispatch_for_quota() {
     emit "paused" "[#$num] Paused new work until $until_iso after Codex quota exhaustion"
   fi
   write_worker_log "$worker_log" "Global dispatch paused for $PAUSE_ON_QUOTA_SECONDS seconds due to quota or billing failure"
+}
+
+pause_dispatch_for_github_rate_limit() {
+  local num="$1" title="$2" worker_log="$3"
+  local reason until_iso
+  reason="GitHub API rate limit while working on #$num $title"
+  if set_pause_state "github" "$reason" "$PAUSE_ON_GITHUB_RATE_LIMIT_SECONDS"; then
+    until_iso=$(jq -r '.paused_until // ""' "$STATE_FILE")
+    emit "paused" "[#$num] Paused GitHub work until $until_iso after API rate limit"
+  fi
+  write_worker_log "$worker_log" "Global dispatch paused for $PAUSE_ON_GITHUB_RATE_LIMIT_SECONDS seconds due to GitHub API rate limiting"
 }
 
 ensure_label_exists() {
@@ -212,9 +230,23 @@ EOF
 }
 
 # -- Per-worker state (no lock needed, one writer per file) --
+worker_state_file() {
+  local num="$1"
+  echo "$WORKERS_DIR/$num.json"
+}
+
+worker_field() {
+  local num="$1" key="$2"
+  local wfile
+  wfile=$(worker_state_file "$num")
+  [ -f "$wfile" ] || return 1
+  jq -r --arg k "$key" '.[$k] // empty' "$wfile" 2>/dev/null
+}
+
 set_worker() {
   local num="$1" key="$2" val="$3"
-  local wfile="$WORKERS_DIR/$num.json"
+  local wfile
+  wfile=$(worker_state_file "$num")
   local tmp=$(mktemp)
   if [ -f "$wfile" ]; then
     jq --arg k "$key" --arg v "$val" '.[$k] = $v' "$wfile" > "$tmp" && mv "$tmp" "$wfile"
@@ -255,10 +287,9 @@ reap_workers() {
   for pidfile in "$WORKERS_DIR"/*.pid; do
     [ -f "$pidfile" ] || continue
     local pid=$(cat "$pidfile")
-    local num=$(basename "$pidfile" .pid)
     if ! kill -0 "$pid" 2>/dev/null; then
       wait "$pid" 2>/dev/null || true
-      rm -f "$pidfile" "$WORKERS_DIR/$num.json"
+      rm -f "$pidfile"
     fi
   done
 }
@@ -449,6 +480,414 @@ existing_pr_url_for_branch() {
   gh pr list --head "$branch" --state open --limit 1 --json url -q '.[0].url // ""' 2>/dev/null || true
 }
 
+complete_worker_success() {
+  local num="$1" branch="$2" worker_log="$3" merged_msg="$4" event_msg="$5"
+  wlog "$num" "${C_GREEN}${merged_msg}"
+  write_worker_log "$worker_log" "$event_msg"
+  emit "pr_merged" "[#$num] $event_msg"
+  increment_global "completed"
+  gh issue edit "$num" --remove-label "agent-wip" --remove-label "agent" > /dev/null 2>&1 || true
+  cleanup_worktree "$branch"
+  remove_worker "$num"
+  return 0
+}
+
+mark_worker_resumable_failure() {
+  local num="$1" phase="$2" message="$3" worker_log="$4"
+  set_worker "$num" "phase" "$phase"
+  set_worker "$num" "last_error" "$message"
+  write_worker_log "$worker_log" "$message"
+  emit "error" "[#$num] $message"
+  increment_global "errors"
+  return 1
+}
+
+mark_worker_blocked_for_human() {
+  local num="$1" phase="$2" message="$3" worker_log="$4"
+  set_worker "$num" "phase" "$phase"
+  set_worker "$num" "last_error" "$message"
+  write_worker_log "$worker_log" "$message"
+  emit "$phase" "[#$num] $message"
+  gh issue edit "$num" --remove-label "agent-wip" > /dev/null 2>&1 || true
+  return 1
+}
+
+prepare_branch_for_handoff() {
+  local num="$1" title="$2" branch="$3" wt_path="$4" worker_log="$5"
+
+  if worktree_has_uncommitted_changes "$wt_path"; then
+    if ! (cd "$wt_path" && git add -A && git commit -q -m "fix: #$num $title") >> "$worker_log" 2>&1; then
+      mark_worker_resumable_failure "$num" "coding" "Commit failed after coding pass" "$worker_log"
+      return 1
+    fi
+  else
+    write_worker_log "$worker_log" "Reusing existing local commit(s) ahead of base"
+  fi
+
+  set_worker "$num" "phase" "pushing"
+  if ! (cd "$wt_path" && git push -u origin HEAD -q) >> "$worker_log" 2>&1; then
+    if worker_log_has_github_rate_limit_error "$worker_log"; then
+      pause_dispatch_for_github_rate_limit "$num" "$title" "$worker_log"
+    fi
+    mark_worker_resumable_failure "$num" "pushing" "Push failed for $branch" "$worker_log"
+    return 1
+  fi
+
+  wlog "$num" "${C_TEAL}Changes pushed"
+  write_worker_log "$worker_log" "Changes committed and pushed on $branch"
+  emit "coding_done" "[#$num] Changes pushed to $branch"
+  return 0
+}
+
+ensure_pr_for_branch() {
+  local num="$1" title="$2" branch="$3" worker_log="$4"
+  local pr_url
+
+  set_worker "$num" "phase" "pr"
+  pr_url=$(existing_pr_url_for_branch "$branch")
+  if [ -z "$pr_url" ]; then
+    if ! pr_url=$(gh pr create \
+      --title "fix: $title" \
+      --body "Closes #$num
+
+---
+*agentify — Codex coded, Claude reviewed.*" \
+      --head "$branch" 2>> "$worker_log"); then
+      if worker_log_has_github_rate_limit_error "$worker_log"; then
+        pause_dispatch_for_github_rate_limit "$num" "$title" "$worker_log"
+      fi
+      mark_worker_resumable_failure "$num" "pr" "PR creation failed for $branch" "$worker_log"
+      return 1
+    fi
+  else
+    write_worker_log "$worker_log" "Reusing existing PR $pr_url"
+  fi
+
+  set_worker "$num" "pr_url" "$pr_url"
+  wlog "$num" "PR: $pr_url"
+  write_worker_log "$worker_log" "Opened PR $pr_url"
+  emit "pr_created" "[#$num] $pr_url"
+  printf '%s\n' "$pr_url"
+  return 0
+}
+
+pr_status_json() {
+  local pr_url="$1" worker_log="${2:-}"
+  local output
+  if ! output=$(gh pr view "$pr_url" --json state,mergeStateStatus,url,headRefName 2>> "${worker_log:-/dev/null}"); then
+    return 1
+  fi
+  printf '%s\n' "$output"
+}
+
+refresh_branch_from_base() {
+  local wt_path="$1" worker_log="$2"
+  local base_ref
+  base_ref=$(default_base_ref)
+  [ -n "$base_ref" ] || return 1
+
+  if ! (cd "$wt_path" && git fetch origin -q && git rebase "$base_ref") >> "$worker_log" 2>&1; then
+    (cd "$wt_path" && git rebase --abort) >> "$worker_log" 2>&1 || true
+    return 1
+  fi
+
+  (cd "$wt_path" && git push --force-with-lease -q) >> "$worker_log" 2>&1
+}
+
+run_merge_phase() {
+  local num="$1" title="$2" branch="$3" wt_path="$4" worker_log="$5" pr_url="$6"
+  local pr_json pr_state merge_state
+
+  set_worker "$num" "phase" "merging"
+  set_worker "$num" "pr_url" "$pr_url"
+
+  if ! pr_json=$(pr_status_json "$pr_url" "$worker_log"); then
+    if worker_log_has_github_rate_limit_error "$worker_log"; then
+      pause_dispatch_for_github_rate_limit "$num" "$title" "$worker_log"
+    fi
+    mark_worker_resumable_failure "$num" "merging" "Unable to inspect PR state for $pr_url" "$worker_log"
+    return 1
+  fi
+
+  pr_state=$(echo "$pr_json" | jq -r '.state // ""')
+  merge_state=$(echo "$pr_json" | jq -r '.mergeStateStatus // ""')
+
+  if [ "$pr_state" = "MERGED" ]; then
+    complete_worker_success "$num" "$branch" "$worker_log" "Merged!" "Merged"
+    return 0
+  fi
+
+  if [ "$merge_state" = "DIRTY" ]; then
+    write_worker_log "$worker_log" "PR $pr_url is DIRTY; attempting branch refresh from base"
+    if refresh_branch_from_base "$wt_path" "$worker_log"; then
+      sleep 2
+      if pr_json=$(pr_status_json "$pr_url" "$worker_log"); then
+        merge_state=$(echo "$pr_json" | jq -r '.mergeStateStatus // ""')
+        pr_state=$(echo "$pr_json" | jq -r '.state // ""')
+      fi
+    fi
+  fi
+
+  if [ "$pr_state" = "MERGED" ]; then
+    complete_worker_success "$num" "$branch" "$worker_log" "Merged!" "Merged"
+    return 0
+  fi
+
+  if [ "$merge_state" = "DIRTY" ]; then
+    gh pr comment "$pr_url" --body "🤖 Merge blocked automatically: branch is dirty against base. Leaving PR open for a human." > /dev/null 2>&1 || true
+    mark_worker_blocked_for_human "$num" "merge_blocked" "Merge blocked for $pr_url (dirty against base)" "$worker_log"
+    return 1
+  fi
+
+  if (gh pr merge "$pr_url" --squash --delete-branch || gh pr merge "$pr_url" --squash --auto --delete-branch) >> "$worker_log" 2>&1; then
+    complete_worker_success "$num" "$branch" "$worker_log" "Merged!" "Merged"
+    return 0
+  fi
+
+  if worker_log_has_github_rate_limit_error "$worker_log"; then
+    pause_dispatch_for_github_rate_limit "$num" "$title" "$worker_log"
+  fi
+
+  if pr_json=$(pr_status_json "$pr_url" "$worker_log"); then
+    pr_state=$(echo "$pr_json" | jq -r '.state // ""')
+    merge_state=$(echo "$pr_json" | jq -r '.mergeStateStatus // ""')
+    if [ "$pr_state" = "MERGED" ]; then
+      complete_worker_success "$num" "$branch" "$worker_log" "Merged!" "Merged"
+      return 0
+    fi
+    if [ "$merge_state" = "DIRTY" ]; then
+      gh pr comment "$pr_url" --body "🤖 Merge blocked automatically: branch is dirty against base. Leaving PR open for a human." > /dev/null 2>&1 || true
+      mark_worker_blocked_for_human "$num" "merge_blocked" "Merge blocked for $pr_url (dirty against base)" "$worker_log"
+      return 1
+    fi
+  fi
+
+  mark_worker_resumable_failure "$num" "merging" "Merge failed for $pr_url" "$worker_log"
+  return 1
+}
+
+run_retry_phase() {
+  local num="$1" title="$2" branch="$3" wt_path="$4" worker_log="$5" pr_url="$6" review_text="$7"
+  local codex_status=0 review review_prompt
+
+  set_worker "$num" "phase" "retrying"
+  set_worker "$num" "pr_url" "$pr_url"
+  set_worker "$num" "review_feedback" "$review_text"
+  emit "retry" "[#$num] Retrying with review feedback"
+
+  REVIEW_TEXT="$review_text"
+  write_worker_log "$worker_log" "Starting Codex retry pass with ${CODEX_PROGRESS_TIMEOUT_SECONDS}s inactivity watchdog"
+  if run_codex_with_watchdog "$wt_path" "$(render_prompt "retry.md")" "$worker_log"; then
+    codex_status=0
+  else
+    codex_status=$?
+  fi
+
+  if [ "$codex_status" -eq 124 ]; then
+    write_worker_log "$worker_log" "Codex retry pass hit absolute ceiling"
+    emit "timeout" "[#$num] Codex retry hit absolute ceiling"
+  elif [ "$codex_status" -eq 125 ]; then
+    write_worker_log "$worker_log" "Codex retry pass stalled"
+    emit "stalled" "[#$num] Codex retry stalled with no progress for ${CODEX_PROGRESS_TIMEOUT_SECONDS}s"
+  elif [ "$codex_status" -ne 0 ]; then
+    write_worker_log "$worker_log" "Codex retry pass failed"
+  fi
+
+  report_repo_blocker_if_needed "$num" "$title" "$worker_log"
+  if [ "$codex_status" -ne 0 ]; then
+    if worker_log_has_quota_error "$worker_log"; then
+      pause_dispatch_for_quota "$num" "$title" "$worker_log"
+    fi
+    mark_worker_resumable_failure "$num" "retrying" "Retry coding pass failed" "$worker_log"
+    return 1
+  fi
+
+  if worktree_has_uncommitted_changes "$wt_path"; then
+    if ! (cd "$wt_path" && git add -A && git commit -q -m "fix: address review on #$num") >> "$worker_log" 2>&1; then
+      mark_worker_resumable_failure "$num" "retrying" "Commit failed after retry on #$num" "$worker_log"
+      return 1
+    fi
+  fi
+
+  if ! prepare_branch_for_handoff "$num" "$title" "$branch" "$wt_path" "$worker_log"; then
+    return 1
+  fi
+
+  set_worker "$num" "phase" "reviewing"
+  ISSUE_DIFF=$(gh pr diff "$pr_url" 2>> "$worker_log") || ISSUE_DIFF=""
+  review_prompt=$(render_prompt "review.md")
+  review=$(claude -p --model "$CLAUDE_MODEL" "$review_prompt")
+
+  if echo "$review" | grep -q "LGTM"; then
+    wlog "$num" "${C_GREEN}LGTM on retry ✓"
+    write_worker_log "$worker_log" "Claude review result after retry: LGTM"
+    emit "review_done" "[#$num] LGTM on retry ✅"
+    gh pr comment "$pr_url" --body "🤖 **Claude: LGTM** ✅" > /dev/null 2>&1 || true
+    run_merge_phase "$num" "$title" "$branch" "$wt_path" "$worker_log" "$pr_url"
+    return $?
+  fi
+
+  wlog "$num" "${C_CORAL}Still needs work. Leaving PR open."
+  write_worker_log "$worker_log" "Review still failing after retry; leaving PR open"
+  emit "review_done" "[#$num] Still needs work after retry"
+  gh pr comment "$pr_url" --body "🤖 **Still needs work:**
+
+$review" > /dev/null 2>&1 || true
+  mark_worker_blocked_for_human "$num" "human_review" "Review still failing after retry for $pr_url" "$worker_log"
+  return 1
+}
+
+run_review_phase() {
+  local num="$1" title="$2" branch="$3" wt_path="$4" worker_log="$5" pr_url="$6"
+  local review_prompt review
+
+  set_worker "$num" "phase" "reviewing"
+  set_worker "$num" "pr_url" "$pr_url"
+  wlog "$num" "${C_CORAL}Claude reviewing..."
+  write_worker_log "$worker_log" "Claude review started"
+  emit "review_start" "[#$num] Claude reviewing"
+
+  if ! ISSUE_DIFF=$(gh pr diff "$pr_url" 2>> "$worker_log"); then
+    if worker_log_has_github_rate_limit_error "$worker_log"; then
+      pause_dispatch_for_github_rate_limit "$num" "$title" "$worker_log"
+    fi
+    mark_worker_resumable_failure "$num" "reviewing" "Unable to load PR diff for $pr_url" "$worker_log"
+    return 1
+  fi
+
+  review_prompt=$(render_prompt "review.md")
+  review=$(claude -p --model "$CLAUDE_MODEL" "$review_prompt")
+
+  if echo "$review" | grep -q "LGTM"; then
+    wlog "$num" "${C_GREEN}LGTM ✓"
+    write_worker_log "$worker_log" "Claude review result: LGTM"
+    emit "review_done" "[#$num] LGTM ✅"
+    gh pr comment "$pr_url" --body "🤖 **Claude: LGTM** ✅" > /dev/null 2>&1 || true
+    run_merge_phase "$num" "$title" "$branch" "$wt_path" "$worker_log" "$pr_url"
+    return $?
+  fi
+
+  wlog "$num" "${C_CORAL}Changes requested — retrying"
+  write_worker_log "$worker_log" "Claude requested changes; retrying"
+  emit "review_done" "[#$num] Changes requested"
+  gh pr comment "$pr_url" --body "🤖 **Review:**
+
+$review" > /dev/null 2>&1 || true
+  run_retry_phase "$num" "$title" "$branch" "$wt_path" "$worker_log" "$pr_url" "$review"
+}
+
+run_ci_phase() {
+  local num="$1" title="$2" branch="$3" wt_path="$4" worker_log="$5" pr_url="$6"
+
+  set_worker "$num" "phase" "ci"
+  set_worker "$num" "pr_url" "$pr_url"
+  sleep 5
+  if ! wait_for_ci "$pr_url" "$num"; then
+    write_worker_log "$worker_log" "CI failed for $pr_url"
+    emit "ci_failed" "[#$num] CI failed"
+    gh pr comment "$pr_url" --body "🤖 CI failed. Leaving PR open." > /dev/null 2>&1 || true
+    mark_worker_blocked_for_human "$num" "ci_failed" "CI failed for $pr_url" "$worker_log"
+    return 1
+  fi
+
+  emit "ci_passed" "[#$num] CI passed"
+  write_worker_log "$worker_log" "CI passed"
+  run_review_phase "$num" "$title" "$branch" "$wt_path" "$worker_log" "$pr_url"
+}
+
+run_post_coding_pipeline() {
+  local num="$1" title="$2" branch="$3" wt_path="$4" worker_log="$5"
+  local pr_url
+
+  if ! prepare_branch_for_handoff "$num" "$title" "$branch" "$wt_path" "$worker_log"; then
+    return 1
+  fi
+
+  if ! pr_url=$(ensure_pr_for_branch "$num" "$title" "$branch" "$worker_log"); then
+    return 1
+  fi
+
+  run_ci_phase "$num" "$title" "$branch" "$wt_path" "$worker_log" "$pr_url"
+}
+
+resume_worker() {
+  local num="$1"
+  local phase title branch worker_log wt_path pr_url issue_json body review_text
+
+  phase=$(worker_field "$num" "phase")
+  title=$(worker_field "$num" "title")
+  branch=$(worker_field "$num" "branch")
+  worker_log=$(worker_field "$num" "log_file")
+  pr_url=$(worker_field "$num" "pr_url")
+  review_text=$(worker_field "$num" "review_feedback")
+
+  [ -n "$worker_log" ] || worker_log=$(worker_log_file "$num")
+  [ -n "$phase" ] || phase="coding"
+
+  if [ "$phase" = "merge_blocked" ] || [ "$phase" = "human_review" ] || [ "$phase" = "ci_failed" ]; then
+    return 0
+  fi
+
+  issue_json=$(gh issue view "$num" --json number,title,body 2>/dev/null || echo '{}')
+  ISSUE_NUM="$num"
+  ISSUE_TITLE="$(echo "$issue_json" | jq -r '.title // empty')"
+  ISSUE_BODY="$(echo "$issue_json" | jq -r '.body // ""')"
+  [ -n "$ISSUE_TITLE" ] || ISSUE_TITLE="$title"
+
+  wt_path=$(create_worktree "$branch") || {
+    mark_worker_resumable_failure "$num" "$phase" "Worktree setup failed while resuming $phase" "$worker_log"
+    return 1
+  }
+  set_worker "$num" "worktree" "$wt_path"
+
+  if [ "$phase" = "coding" ] && ! worktree_has_uncommitted_changes "$wt_path" && [ "$(worktree_unique_commit_count "$wt_path")" -eq 0 ]; then
+    work_issue "$issue_json"
+    return $?
+  fi
+
+  case "$phase" in
+    coding|pushing|pr)
+      emit "coding_resume" "[#$num] Resuming from preserved local commit(s)"
+      run_post_coding_pipeline "$num" "$ISSUE_TITLE" "$branch" "$wt_path" "$worker_log"
+      ;;
+    ci)
+      [ -n "$pr_url" ] || pr_url=$(existing_pr_url_for_branch "$branch")
+      [ -n "$pr_url" ] || {
+        mark_worker_resumable_failure "$num" "pr" "Missing PR while resuming CI for $branch" "$worker_log"
+        return 1
+      }
+      run_ci_phase "$num" "$ISSUE_TITLE" "$branch" "$wt_path" "$worker_log" "$pr_url"
+      ;;
+    reviewing)
+      [ -n "$pr_url" ] || pr_url=$(existing_pr_url_for_branch "$branch")
+      [ -n "$pr_url" ] || {
+        mark_worker_resumable_failure "$num" "pr" "Missing PR while resuming review for $branch" "$worker_log"
+        return 1
+      }
+      run_review_phase "$num" "$ISSUE_TITLE" "$branch" "$wt_path" "$worker_log" "$pr_url"
+      ;;
+    retrying)
+      [ -n "$pr_url" ] || pr_url=$(existing_pr_url_for_branch "$branch")
+      [ -n "$pr_url" ] || {
+        mark_worker_resumable_failure "$num" "pr" "Missing PR while resuming retry for $branch" "$worker_log"
+        return 1
+      }
+      run_retry_phase "$num" "$ISSUE_TITLE" "$branch" "$wt_path" "$worker_log" "$pr_url" "$review_text"
+      ;;
+    merging)
+      [ -n "$pr_url" ] || pr_url=$(existing_pr_url_for_branch "$branch")
+      [ -n "$pr_url" ] || {
+        mark_worker_resumable_failure "$num" "pr" "Missing PR while resuming merge for $branch" "$worker_log"
+        return 1
+      }
+      run_merge_phase "$num" "$ISSUE_TITLE" "$branch" "$wt_path" "$worker_log" "$pr_url"
+      ;;
+    *)
+      work_issue "$issue_json"
+      ;;
+  esac
+}
+
 # ============================================================
 # Worker — handles one issue end-to-end in its own worktree
 # Runs as a background process, one per issue
@@ -562,186 +1001,7 @@ work_issue() {
     return 1
   fi
 
-  # Commit & push
-  if worktree_has_uncommitted_changes "$wt_path"; then
-    if ! (cd "$wt_path" && git add -A && git commit -q -m "fix: #$num $title") >> "$worker_log" 2>&1; then
-      wlog "$num" "${C_RED}Commit failed"
-      write_worker_log "$worker_log" "Commit failed after coding pass"
-      emit "error" "[#$num] Commit failed"
-      increment_global "errors"
-      gh issue edit "$num" --remove-label "agent-wip" --add-label "agent" > /dev/null 2>&1 || true
-      remove_worker "$num"
-      return 1
-    fi
-  else
-    write_worker_log "$worker_log" "Reusing existing local commit(s) ahead of base"
-  fi
-
-  if ! (cd "$wt_path" && git push -u origin HEAD -q) >> "$worker_log" 2>&1; then
-    wlog "$num" "${C_RED}Push failed"
-    write_worker_log "$worker_log" "Push failed for $branch"
-    emit "error" "[#$num] Push failed"
-    increment_global "errors"
-    gh issue edit "$num" --remove-label "agent-wip" --add-label "agent" > /dev/null 2>&1 || true
-    remove_worker "$num"
-    return 1
-  fi
-  wlog "$num" "${C_TEAL}Changes pushed"
-  write_worker_log "$worker_log" "Changes committed and pushed on $branch"
-  emit "coding_done" "[#$num] Changes pushed to $branch"
-
-  # ---- PR ----
-  set_worker "$num" "phase" "pr"
-  local pr_url
-  pr_url=$(existing_pr_url_for_branch "$branch")
-  if [ -z "$pr_url" ]; then
-    if ! pr_url=$(gh pr create \
-      --title "fix: $title" \
-      --body "Closes #$num
-
----
-*agentify — Codex coded, Claude reviewed.*" \
-      --head "$branch" 2>> "$worker_log"); then
-      wlog "$num" "${C_RED}PR creation failed"
-      write_worker_log "$worker_log" "PR creation failed for $branch"
-      emit "error" "[#$num] PR creation failed"
-      increment_global "errors"
-      gh issue edit "$num" --remove-label "agent-wip" --add-label "agent" > /dev/null 2>&1 || true
-      remove_worker "$num"
-      return 1
-    fi
-  else
-    write_worker_log "$worker_log" "Reusing existing PR $pr_url"
-  fi
-
-  wlog "$num" "PR: $pr_url"
-  write_worker_log "$worker_log" "Opened PR $pr_url"
-  emit "pr_created" "[#$num] $pr_url"
-
-  # ---- CI ----
-  set_worker "$num" "phase" "ci"
-  sleep 5
-  if ! wait_for_ci "$pr_url" "$num"; then
-    wlog "$num" "${C_RED}CI failed"
-    write_worker_log "$worker_log" "CI failed for $pr_url"
-    emit "ci_failed" "[#$num] CI failed"
-    gh pr comment "$pr_url" --body "🤖 CI failed. Leaving PR open." > /dev/null 2>&1 || true
-    local wt_clean="$WORKTREE_DIR/$branch"
-    [ -d "$wt_clean" ] && git worktree remove "$wt_clean" --force 2>/dev/null
-    remove_worker "$num"
-    return 1
-  fi
-  emit "ci_passed" "[#$num] CI passed"
-  write_worker_log "$worker_log" "CI passed"
-
-  # ---- Review ----
-  set_worker "$num" "phase" "reviewing"
-  wlog "$num" "${C_CORAL}Claude reviewing..."
-  write_worker_log "$worker_log" "Claude review started"
-  emit "review_start" "[#$num] Claude reviewing"
-
-  ISSUE_DIFF=$(gh pr diff "$pr_url")
-  local review_prompt review
-  review_prompt=$(render_prompt "review.md")
-  review=$(claude -p --model "$CLAUDE_MODEL" "$review_prompt")
-
-  if echo "$review" | grep -q "LGTM"; then
-    wlog "$num" "${C_GREEN}LGTM ✓"
-    write_worker_log "$worker_log" "Claude review result: LGTM"
-    emit "review_done" "[#$num] LGTM ✅"
-    gh pr comment "$pr_url" --body "🤖 **Claude: LGTM** ✅" > /dev/null 2>&1 || true
-
-    set_worker "$num" "phase" "merging"
-    gh pr merge "$pr_url" --squash --delete-branch 2>/dev/null || \
-      gh pr merge "$pr_url" --squash --auto --delete-branch 2>/dev/null
-
-    wlog "$num" "${C_GREEN}Merged!"
-    write_worker_log "$worker_log" "PR merged successfully"
-    emit "pr_merged" "[#$num] Merged"
-    increment_global "completed"
-
-    local wt_clean="$WORKTREE_DIR/$branch"
-    [ -d "$wt_clean" ] && git worktree remove "$wt_clean" --force 2>/dev/null
-    gh issue edit "$num" --remove-label "agent-wip" > /dev/null 2>&1 || true
-    remove_worker "$num"
-    return 0
-  fi
-
-  # ---- Retry with feedback ----
-  wlog "$num" "${C_CORAL}Changes requested — retrying"
-  write_worker_log "$worker_log" "Claude requested changes; retrying"
-  emit "review_done" "[#$num] Changes requested"
-  gh pr comment "$pr_url" --body "🤖 **Review:**
-
-$review" > /dev/null 2>&1 || true
-
-  set_worker "$num" "phase" "retrying"
-  emit "retry" "[#$num] Retrying with review feedback"
-
-  REVIEW_TEXT="$review"
-  local retry_prompt
-  retry_prompt=$(render_prompt "retry.md")
-
-  write_worker_log "$worker_log" "Starting Codex retry pass with ${CODEX_PROGRESS_TIMEOUT_SECONDS}s inactivity watchdog"
-  if run_codex_with_watchdog "$wt_path" "$retry_prompt" "$worker_log"; then
-    codex_status=0
-  else
-    codex_status=$?
-  fi
-  if [ "$codex_status" -eq 124 ]; then
-    write_worker_log "$worker_log" "Codex retry pass hit absolute ceiling"
-    emit "timeout" "[#$num] Codex retry hit absolute ceiling"
-  elif [ "$codex_status" -eq 125 ]; then
-    write_worker_log "$worker_log" "Codex retry pass stalled"
-    emit "stalled" "[#$num] Codex retry stalled with no progress for ${CODEX_PROGRESS_TIMEOUT_SECONDS}s"
-  fi
-  report_repo_blocker_if_needed "$num" "$title" "$worker_log"
-
-  if (cd "$wt_path" && (! git diff --quiet || ! git diff --cached --quiet || \
-     [ -n "$(git ls-files --others --exclude-standard)" ])); then
-    (cd "$wt_path" && git add -A && git commit -q -m "fix: address review on #$num")
-    (cd "$wt_path" && git push -q) 2>/dev/null
-
-    set_worker "$num" "phase" "reviewing"
-    ISSUE_DIFF=$(gh pr diff "$pr_url")
-    review_prompt=$(render_prompt "review.md")
-    review=$(claude -p --model "$CLAUDE_MODEL" "$review_prompt")
-
-    if echo "$review" | grep -q "LGTM"; then
-      wlog "$num" "${C_GREEN}LGTM on retry ✓"
-      write_worker_log "$worker_log" "Claude review result after retry: LGTM"
-      emit "review_done" "[#$num] LGTM on retry ✅"
-      gh pr comment "$pr_url" --body "🤖 **Claude: LGTM** ✅" > /dev/null 2>&1 || true
-
-      set_worker "$num" "phase" "merging"
-      gh pr merge "$pr_url" --squash --delete-branch 2>/dev/null || \
-        gh pr merge "$pr_url" --squash --auto --delete-branch 2>/dev/null
-
-      wlog "$num" "${C_GREEN}Merged after retry!"
-      write_worker_log "$worker_log" "PR merged after retry"
-      emit "pr_merged" "[#$num] Merged after retry"
-      increment_global "completed"
-
-      local wt_clean="$WORKTREE_DIR/$branch"
-      [ -d "$wt_clean" ] && git worktree remove "$wt_clean" --force 2>/dev/null
-      gh issue edit "$num" --remove-label "agent-wip" > /dev/null 2>&1 || true
-      remove_worker "$num"
-      return 0
-    fi
-  fi
-
-  # Give up — leave PR open for human
-  wlog "$num" "${C_CORAL}Still needs work. Leaving PR open."
-  write_worker_log "$worker_log" "Review still failing after retry; leaving PR open"
-  emit "review_done" "[#$num] Still needs work after retry"
-  gh pr comment "$pr_url" --body "🤖 **Still needs work:**
-
-$review" > /dev/null 2>&1 || true
-
-  local wt_clean="$WORKTREE_DIR/$branch"
-  [ -d "$wt_clean" ] && git worktree remove "$wt_clean" --force 2>/dev/null
-  remove_worker "$num"
-  return 1
+  run_post_coding_pipeline "$num" "$title" "$branch" "$wt_path" "$worker_log"
 }
 
 # ============================================================
@@ -754,14 +1014,18 @@ init_run() {
     now=$(date +%s)
     tmp=$(mktemp)
     jq --argjson now "$now" \
-      '{completed:"0", errors:"0"} + (if (.paused_until_epoch // 0) > $now then {pause_kind, pause_reason, paused_until, paused_until_epoch} else {} end)' \
+      '.completed = (.completed // "0")
+       | .errors = (.errors // "0")
+       | if (.paused_until_epoch // 0) > $now then .
+         else del(.pause_kind, .pause_reason, .paused_until, .paused_until_epoch)
+         end' \
       "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
   else
     echo '{"completed":"0","errors":"0"}' > "$STATE_FILE"
   fi
-  : > "$EVENTS_FILE"
+  [ -f "$EVENTS_FILE" ] || touch "$EVENTS_FILE"
   # Clean stale worker state from previous runs
-  rm -f "$WORKERS_DIR"/*.json "$WORKERS_DIR"/*.pid 2>/dev/null
+  rm -f "$WORKERS_DIR"/*.pid 2>/dev/null
 }
 
 recover_orphaned_wip_issues() {
@@ -784,8 +1048,39 @@ recover_orphaned_wip_issues() {
       continue
     fi
 
+    if [ -f "$(worker_state_file "$num")" ]; then
+      continue
+    fi
+
     gh issue edit "$num" --remove-label "agent-wip" --add-label "agent" 2>/dev/null || continue
     emit "requeued" "[#$num] Re-queued orphaned agent-wip issue ($source): $title"
+  done
+}
+
+resume_orphaned_workers() {
+  local slots="${1:-0}"
+  [ "$slots" -le 0 ] && return 0
+
+  for wfile in "$WORKERS_DIR"/*.json; do
+    [ -f "$wfile" ] || continue
+
+    local num phase title
+    num=$(basename "$wfile" .json)
+    phase=$(jq -r '.phase // "coding"' "$wfile" 2>/dev/null || echo "coding")
+    title=$(jq -r '.title // ""' "$wfile" 2>/dev/null || echo "")
+
+    is_issue_claimed "$num" && continue
+    case "$phase" in
+      merge_blocked|human_review|ci_failed)
+        continue
+        ;;
+    esac
+
+    log "${C_YELLOW}Resuming worker for #$num: ${title:-issue $num} (${phase})"
+    resume_worker "$num" &
+    echo "$!" > "$WORKERS_DIR/$num.pid"
+    slots=$((slots - 1))
+    [ "$slots" -le 0 ] && break
   done
 }
 
@@ -821,6 +1116,13 @@ main_loop() {
 
     # Reap finished workers
     reap_workers
+    local active
+    active=$(active_worker_count)
+    local slots
+    slots=$((MAX_CONCURRENT - active))
+    if [ "$slots" -gt 0 ]; then
+      resume_orphaned_workers "$slots"
+    fi
     recover_orphaned_wip_issues "runtime"
 
     resume_pause_if_expired || true
@@ -838,8 +1140,8 @@ main_loop() {
     fi
 
     # Check available slots
-    local active=$(active_worker_count)
-    local slots=$((MAX_CONCURRENT - active))
+    active=$(active_worker_count)
+    slots=$((MAX_CONCURRENT - active))
 
     if [ "$slots" -gt 0 ]; then
       # Pick issues (only those labeled 'agent', not 'agent-wip')
