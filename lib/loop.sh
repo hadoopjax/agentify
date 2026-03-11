@@ -21,6 +21,7 @@ LOGS_DIR="$AGENTIFY_DIR/logs"
 POLL_INTERVAL="${POLL_INTERVAL:-60}"
 MAX_RUNS="${MAX_RUNS:-0}"
 MAX_CONCURRENT="${MAX_CONCURRENT:-3}"
+PAUSE_ON_QUOTA_SECONDS="${PAUSE_ON_QUOTA_SECONDS:-1800}"
 CODEX_MODEL="${CODEX_MODEL:-gpt-5.4}"
 CODEX_EFFORT="${CODEX_EFFORT:-high}"
 CLAUDE_MODEL="${CLAUDE_MODEL:-claude-opus-4-6}"
@@ -62,6 +63,90 @@ increment_global() {
   local tmp=$(mktemp)
   jq --arg k "$key" --arg v "$val" '.[$k] = $v' "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
   rmdir "$lockdir"
+}
+
+epoch_to_iso() {
+  local epoch="$1"
+  date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$epoch" +%Y-%m-%dT%H:%M:%SZ
+}
+
+clear_pause_state() {
+  local lockdir="$AGENTIFY_DIR/.state.lock"
+  while ! mkdir "$lockdir" 2>/dev/null; do sleep 0.1; done
+  local tmp
+  tmp=$(mktemp)
+  jq 'del(.pause_kind, .pause_reason, .paused_until, .paused_until_epoch)' "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
+  rmdir "$lockdir"
+}
+
+set_pause_state() {
+  local kind="$1" reason="$2" seconds="$3"
+  local now until_epoch until_iso previous_until previous_kind
+  now=$(date +%s)
+  until_epoch=$((now + seconds))
+  until_iso=$(epoch_to_iso "$until_epoch")
+  previous_until=$(jq -r '.paused_until_epoch // 0' "$STATE_FILE")
+  previous_kind=$(jq -r '.pause_kind // ""' "$STATE_FILE")
+
+  local lockdir="$AGENTIFY_DIR/.state.lock"
+  while ! mkdir "$lockdir" 2>/dev/null; do sleep 0.1; done
+  local tmp
+  tmp=$(mktemp)
+  jq \
+    --arg kind "$kind" \
+    --arg reason "$reason" \
+    --arg until_iso "$until_iso" \
+    --argjson until_epoch "$until_epoch" \
+    '.pause_kind = $kind
+     | .pause_reason = $reason
+     | .paused_until = $until_iso
+     | .paused_until_epoch = $until_epoch' \
+    "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
+  rmdir "$lockdir"
+
+  [ "$until_epoch" -gt "${previous_until:-0}" ] || [ "$kind" != "$previous_kind" ]
+}
+
+pause_remaining_seconds() {
+  local until now
+  until=$(jq -r '.paused_until_epoch // 0' "$STATE_FILE")
+  now=$(date +%s)
+  if [ "${until:-0}" -gt "$now" ]; then
+    echo $((until - now))
+  else
+    echo 0
+  fi
+}
+
+resume_pause_if_expired() {
+  local until now reason
+  until=$(jq -r '.paused_until_epoch // 0' "$STATE_FILE")
+  now=$(date +%s)
+  if [ "${until:-0}" -le 0 ] || [ "$until" -gt "$now" ]; then
+    return 1
+  fi
+
+  reason=$(jq -r '.pause_reason // "pause window expired"' "$STATE_FILE")
+  clear_pause_state
+  emit "resumed" "Resuming dispatch after pause: $reason"
+  return 0
+}
+
+worker_log_has_quota_error() {
+  local logfile="$1"
+  [ -f "$logfile" ] || return 1
+  grep -Eiq 'quota exceeded|insufficient_quota|check your plan and billing details|billing details|rate limit|rate_limit|429' "$logfile"
+}
+
+pause_dispatch_for_quota() {
+  local num="$1" title="$2" worker_log="$3"
+  local reason until_iso
+  reason="Codex quota or billing failure while working on #$num $title"
+  if set_pause_state "quota" "$reason" "$PAUSE_ON_QUOTA_SECONDS"; then
+    until_iso=$(jq -r '.paused_until // ""' "$STATE_FILE")
+    emit "paused" "[#$num] Paused new work until $until_iso after Codex quota exhaustion"
+  fi
+  write_worker_log "$worker_log" "Global dispatch paused for $PAUSE_ON_QUOTA_SECONDS seconds due to quota or billing failure"
 }
 
 # -- Per-worker state (no lock needed, one writer per file) --
@@ -252,6 +337,10 @@ work_issue() {
   if ! (cd "$wt_path" && codex exec --full-auto --model "$CODEX_MODEL" -c model_reasoning_effort="$CODEX_EFFORT" "$code_prompt") >> "$worker_log" 2>&1; then
     wlog "$num" "${C_RED}Codex failed"
     write_worker_log "$worker_log" "Codex coding pass failed"
+    if worker_log_has_quota_error "$worker_log"; then
+      wlog "$num" "${C_YELLOW}Pausing new work for quota exhaustion"
+      pause_dispatch_for_quota "$num" "$title" "$worker_log"
+    fi
     emit "error" "[#$num] Codex failed"
     increment_global "errors"
     cleanup_worktree "$branch"
@@ -413,7 +502,16 @@ $review" > /dev/null 2>&1 || true
 # ============================================================
 init_run() {
   mkdir -p "$AGENTIFY_DIR" "$WORKERS_DIR" "$WORKTREE_DIR" "$LOGS_DIR"
-  echo '{"completed":"0","errors":"0"}' > "$STATE_FILE"
+  if [ -f "$STATE_FILE" ]; then
+    local now tmp
+    now=$(date +%s)
+    tmp=$(mktemp)
+    jq --argjson now "$now" \
+      '{completed:"0", errors:"0"} + (if (.paused_until_epoch // 0) > $now then {pause_kind, pause_reason, paused_until, paused_until_epoch} else {} end)' \
+      "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
+  else
+    echo '{"completed":"0","errors":"0"}' > "$STATE_FILE"
+  fi
   : > "$EVENTS_FILE"
   # Clean stale worker state from previous runs
   rm -f "$WORKERS_DIR"/*.json "$WORKERS_DIR"/*.pid 2>/dev/null
@@ -471,6 +569,20 @@ main_loop() {
 
     # Reap finished workers
     reap_workers
+
+    resume_pause_if_expired || true
+
+    local pause_remaining
+    pause_remaining=$(pause_remaining_seconds)
+    if [ "$pause_remaining" -gt 0 ]; then
+      local sleep_for
+      sleep_for="$POLL_INTERVAL"
+      if [ "$pause_remaining" -lt "$sleep_for" ]; then
+        sleep_for="$pause_remaining"
+      fi
+      sleep "$sleep_for"
+      continue
+    fi
 
     # Check available slots
     local active=$(active_worker_count)

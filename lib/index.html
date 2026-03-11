@@ -81,6 +81,7 @@
   }
   .pill-idle { background: var(--sand-soft); color: #B8860B; }
   .pill-active { background: var(--teal-soft); color: #1A8A7D; }
+  .pill-paused { background: var(--coral-soft); color: #C35B58; }
 
   .beacon {
     width: 8px; height: 8px; border-radius: 50%;
@@ -92,7 +93,13 @@
     box-shadow: 0 0 0 3px rgba(43,181,166,0.2);
     animation: breathe 2.5s ease-in-out infinite;
   }
+  .beacon.paused {
+    background: var(--coral);
+    box-shadow: 0 0 0 3px rgba(242,112,109,0.18);
+    animation: breathePaused 2.5s ease-in-out infinite;
+  }
   @keyframes breathe { 0%,100%{ box-shadow: 0 0 0 3px rgba(43,181,166,0.2) } 50%{ box-shadow: 0 0 0 6px rgba(43,181,166,0.08) } }
+  @keyframes breathePaused { 0%,100%{ box-shadow: 0 0 0 3px rgba(242,112,109,0.18) } 50%{ box-shadow: 0 0 0 6px rgba(242,112,109,0.08) } }
 
   /* Sections */
   .section { margin-bottom: 32px; }
@@ -191,6 +198,22 @@
 
   .run-latest strong {
     color: var(--text);
+  }
+
+  .run-note {
+    margin-top: 12px;
+    border: 1px solid #F7D9D7;
+    border-radius: var(--radius-sm);
+    background: var(--coral-soft);
+    color: #944542;
+    padding: 12px 14px;
+    font-size: 12px;
+    line-height: 1.55;
+    display: none;
+  }
+
+  .run-note strong {
+    color: #7F3532;
   }
 
   /* Plan bar */
@@ -759,6 +782,7 @@
           <div class="run-latest" id="run-latest"><strong>Waiting</strong><br>No events yet.</div>
         </div>
       </div>
+      <div class="run-note" id="run-note"></div>
     </div>
   </div>
 
@@ -926,9 +950,32 @@ async function fetchWorkerLog() {
   }
 }
 
+function activePause(state = {}) {
+  const until = Number(state.paused_until_epoch || 0);
+  if (!until) return null;
+  const now = Math.floor(Date.now() / 1000);
+  if (until <= now) return null;
+  return {
+    until,
+    untilIso: state.paused_until || '',
+    reason: state.pause_reason || '',
+    kind: state.pause_kind || ''
+  };
+}
+
+function formatRemaining(seconds) {
+  if (seconds <= 0) return 'less than a minute';
+  const mins = Math.ceil(seconds / 60);
+  if (mins < 60) return mins + 'm';
+  const hours = Math.floor(mins / 60);
+  const rem = mins % 60;
+  return rem === 0 ? hours + 'h' : hours + 'h ' + rem + 'm';
+}
+
 function renderRunSummary(state = {}) {
   const workers = Object.entries(state.workers || {});
   const queued = state.queued_issues || [];
+  const pause = activePause(state);
 
   $('run-active-count').textContent = String(workers.length);
   $('run-queue-count').textContent = String(queued.length);
@@ -961,6 +1008,20 @@ function renderRunSummary(state = {}) {
     latest.innerHTML = '<strong>Waiting</strong><br>No events yet.';
   } else {
     latest.innerHTML = '<strong>' + esc(ago(latestEvent.ts)) + '</strong><br>' + esc(latestEvent.msg || '');
+  }
+
+  const note = $('run-note');
+  if (!pause) {
+    note.style.display = 'none';
+    note.innerHTML = '';
+  } else {
+    const seconds = Math.max(0, pause.until - Math.floor(Date.now() / 1000));
+    note.style.display = 'block';
+    note.innerHTML = '<strong>Dispatch paused.</strong> New Codex work is on hold for '
+      + esc(formatRemaining(seconds))
+      + '.<br>'
+      + esc(pause.reason || 'Quota or billing issue detected.')
+      + (pause.untilIso ? '<br>Retry after ' + esc(pause.untilIso) + '.' : '');
   }
 }
 
@@ -1267,18 +1328,25 @@ function esc(s) {
 }
 
 // -- Workers --
-function updateWorkers(workers) {
+function updateWorkers(workers, state = {}) {
   const container = $('workers');
   const entries = Object.entries(workers || {});
   const pill = $('pill');
   const beacon = $('beacon');
   const emptyEl = $('workers-empty');
+  const pause = activePause(state);
 
   if (entries.length === 0) {
     if (emptyEl) emptyEl.style.display = '';
-    pill.textContent = 'idle';
-    pill.className = 'pill pill-idle';
-    beacon.className = 'beacon';
+    if (pause) {
+      pill.textContent = 'paused';
+      pill.className = 'pill pill-paused';
+      beacon.className = 'beacon paused';
+    } else {
+      pill.textContent = 'idle';
+      pill.className = 'pill pill-idle';
+      beacon.className = 'beacon';
+    }
     // Remove any leftover worker cards
     container.querySelectorAll('.card[data-wk]').forEach(c => c.remove());
     prevWorkerKeys = new Set();
@@ -1353,7 +1421,14 @@ function addEvent(ev) {
 
   tl.insertBefore(row, tl.firstChild);
   latestEvent = ev;
-  renderRunSummary({ workers: currentWorkersCache, queued_issues: currentQueueCache });
+  renderRunSummary({
+    workers: currentWorkersCache,
+    queued_issues: currentQueueCache,
+    paused_until_epoch: window.currentPauseUntilEpoch || 0,
+    paused_until: window.currentPauseUntil || '',
+    pause_reason: window.currentPauseReason || '',
+    pause_kind: window.currentPauseKind || ''
+  });
 
   // Cap at 80 events
   while (tl.children.length > 80) tl.removeChild(tl.lastChild);
@@ -1368,7 +1443,11 @@ async function poll() {
     if (st.repo) $('repo').textContent = st.repo;
     currentWorkersCache = st.workers || {};
     currentQueueCache = st.queued_issues || [];
-    updateWorkers(st.workers);
+    window.currentPauseUntilEpoch = st.paused_until_epoch || 0;
+    window.currentPauseUntil = st.paused_until || '';
+    window.currentPauseReason = st.pause_reason || '';
+    window.currentPauseKind = st.pause_kind || '';
+    updateWorkers(st.workers, st);
     renderRunSummary(st);
     $('s-done').textContent = st.completed || '0';
     $('s-err').textContent = st.errors || '0';
