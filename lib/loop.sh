@@ -361,12 +361,33 @@ init_run() {
   rm -f "$WORKERS_DIR"/*.json "$WORKERS_DIR"/*.pid 2>/dev/null
 }
 
+recover_stale_wip_issues() {
+  local issues_json count
+  issues_json=$(gh issue list --label agent-wip --state open --limit 100 --json number,title 2>/dev/null || echo '[]')
+  count=$(echo "$issues_json" | jq 'length' 2>/dev/null || echo 0)
+
+  if [ "$count" -eq 0 ]; then
+    return 0
+  fi
+
+  for ((i=0; i<count; i++)); do
+    local issue num title
+    issue=$(echo "$issues_json" | jq -c ".[$i]")
+    num=$(echo "$issue" | jq -r '.number')
+    title=$(echo "$issue" | jq -r '.title')
+
+    gh issue edit "$num" --remove-label "agent-wip" --add-label "agent" 2>/dev/null || continue
+    emit "requeued" "[#$num] Re-queued stale agent-wip issue: $title"
+  done
+}
+
 main_loop() {
   local repo
   repo=$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>/dev/null || echo "unknown")
 
   init_run
   set_state "repo" "$repo"
+  recover_stale_wip_issues
 
   printf "\n  ${C_TEAL}${C_BOLD}agentify${C_RESET} ${C_DIM}◉${C_RESET} running\n"
   printf "  ${C_DIM}├─${C_RESET} repo: ${C_BOLD}$repo${C_RESET}\n"
