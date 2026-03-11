@@ -106,6 +106,79 @@
     padding-left: 2px;
   }
 
+  .run-card {
+    padding: 18px 20px;
+  }
+
+  .run-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .run-block {
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-sm);
+    background: var(--surface-hover);
+    padding: 14px;
+    min-height: 108px;
+  }
+
+  .run-label {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.9px;
+    text-transform: uppercase;
+    color: var(--text-tertiary);
+    margin-bottom: 8px;
+  }
+
+  .run-count {
+    font-size: 24px;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--text);
+    margin-bottom: 8px;
+  }
+
+  .run-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .run-item {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .run-item strong {
+    color: var(--text);
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 11px;
+    margin-right: 6px;
+  }
+
+  .run-empty {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    line-height: 1.4;
+  }
+
+  .run-latest {
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+  }
+
+  .run-latest strong {
+    color: var(--text);
+  }
+
   /* Plan bar */
   .plan-bar {
     background: var(--surface);
@@ -376,6 +449,21 @@
     white-space: nowrap;
   }
 
+  .worker-meta {
+    margin-top: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+
+  .worker-chip {
+    background: var(--border-light);
+    border-radius: 999px;
+    padding: 3px 9px;
+  }
+
   /* Empty states */
   .empty-state {
     padding: 40px 24px;
@@ -516,6 +604,12 @@
     to { opacity: 1; transform: translateY(0); }
   }
   .card[data-new] { animation: slideIn 0.25s ease; }
+
+  @media (max-width: 720px) {
+    .run-grid {
+      grid-template-columns: 1fr;
+    }
+  }
 </style>
 </head>
 <body>
@@ -537,6 +631,32 @@
     <div class="plan-actions">
       <button class="btn btn-ghost" id="group-btn">Group Existing</button>
       <button class="btn btn-primary" id="plan-btn">Plan</button>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">Run Status</div>
+    <div class="card run-card">
+      <div class="run-grid">
+        <div class="run-block">
+          <div class="run-label">Now Running</div>
+          <div class="run-count" id="run-active-count">0</div>
+          <div class="run-list" id="run-active-list">
+            <div class="run-empty">No active workers.</div>
+          </div>
+        </div>
+        <div class="run-block">
+          <div class="run-label">Queued Next</div>
+          <div class="run-count" id="run-queue-count">0</div>
+          <div class="run-list" id="run-queue-list">
+            <div class="run-empty">No queued issues.</div>
+          </div>
+        </div>
+        <div class="run-block">
+          <div class="run-label">Latest Event</div>
+          <div class="run-latest" id="run-latest"><strong>Waiting</strong><br>No events yet.</div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -597,6 +717,9 @@ let prevWorkerKeys = new Set();
 let prevEpicData = '';
 let planning = false;
 let grouping = false;
+let latestEvent = null;
+let currentWorkersCache = {};
+let currentQueueCache = [];
 
 const phaseLabel = {
   idle:'Idle', starting:'Starting', coding:'Coding',
@@ -642,6 +765,44 @@ function uptime() {
 }
 
 function $(id) { return document.getElementById(id); }
+
+function renderRunSummary(state = {}) {
+  const workers = Object.entries(state.workers || {});
+  const queued = state.queued_issues || [];
+
+  $('run-active-count').textContent = String(workers.length);
+  $('run-queue-count').textContent = String(queued.length);
+
+  const activeList = $('run-active-list');
+  if (workers.length === 0) {
+    activeList.innerHTML = '<div class="run-empty">No active workers.</div>';
+  } else {
+    activeList.innerHTML = workers
+      .sort((a, b) => Number(a[0]) - Number(b[0]))
+      .map(([num, worker]) => {
+        const phase = phaseLabel[worker.phase || 'idle'] || (worker.phase || 'idle');
+        return '<div class="run-item"><strong>#' + esc(num) + '</strong>' + esc(worker.title || '') + ' · ' + esc(phase) + '</div>';
+      })
+      .join('');
+  }
+
+  const queueList = $('run-queue-list');
+  if (queued.length === 0) {
+    queueList.innerHTML = '<div class="run-empty">No queued issues.</div>';
+  } else {
+    queueList.innerHTML = queued
+      .slice(0, 5)
+      .map(issue => '<div class="run-item"><strong>#' + esc(issue.number) + '</strong>' + esc(issue.title || '') + '</div>')
+      .join('');
+  }
+
+  const latest = $('run-latest');
+  if (!latestEvent) {
+    latest.innerHTML = '<strong>Waiting</strong><br>No events yet.';
+  } else {
+    latest.innerHTML = '<strong>' + esc(ago(latestEvent.ts)) + '</strong><br>' + esc(latestEvent.msg || '');
+  }
+}
 
 // -- Plan --
 async function submitPlan() {
@@ -1005,6 +1166,10 @@ function updateWorkers(workers) {
       + '<div class="worker-phase worker-phase-' + phase + '">' + (phaseLabel[phase] || phase) + '</div>'
       + '<div class="worker-title">' + esc(title) + '</div>'
       + (branch ? '<div class="worker-branch">' + esc(branch) + '</div>' : '')
+      + '<div class="worker-meta">'
+      + '<span class="worker-chip">Issue #' + esc(num) + '</span>'
+      + (w.worktree ? '<span class="worker-chip">' + esc(w.worktree) + '</span>' : '')
+      + '</div>'
       + '</div></div>';
   });
 
@@ -1026,6 +1191,8 @@ function addEvent(ev) {
     + '<div class="ev-when">' + ago(ev.ts) + '</div>';
 
   tl.insertBefore(row, tl.firstChild);
+  latestEvent = ev;
+  renderRunSummary({ workers: currentWorkersCache, queued_issues: currentQueueCache });
 
   // Cap at 80 events
   while (tl.children.length > 80) tl.removeChild(tl.lastChild);
@@ -1038,7 +1205,10 @@ async function poll() {
     const st = await stRes.json();
 
     if (st.repo) $('repo').textContent = st.repo;
+    currentWorkersCache = st.workers || {};
+    currentQueueCache = st.queued_issues || [];
     updateWorkers(st.workers);
+    renderRunSummary(st);
     $('s-done').textContent = st.completed || '0';
     $('s-err').textContent = st.errors || '0';
 

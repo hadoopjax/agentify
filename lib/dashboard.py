@@ -14,6 +14,19 @@ AGENTIFY_BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "b
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
+    def _list_issues(self, label):
+        try:
+            result = subprocess.run(
+                ["gh", "issue", "list", "--label", label, "--state", "open", "--limit", "25",
+                 "--json", "number,title,url"],
+                capture_output=True, text=True, timeout=15
+            )
+            if result.returncode != 0:
+                return []
+            return json.loads(result.stdout) if result.stdout.strip() else []
+        except Exception:
+            return []
+
     def do_GET(self):
         if self.path == "/":
             self._serve_file(HTML_FILE, "text/html")
@@ -80,6 +93,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     except (json.JSONDecodeError, FileNotFoundError):
                         pass
         state["workers"] = workers
+        state["queued_issues"] = self._list_issues("agent")
+        state["wip_issues"] = self._list_issues("agent-wip")
 
         self._json_response(state)
 
