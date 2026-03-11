@@ -23,6 +23,9 @@ MAX_RUNS="${MAX_RUNS:-0}"
 MAX_CONCURRENT="${MAX_CONCURRENT:-3}"
 PAUSE_ON_QUOTA_SECONDS="${PAUSE_ON_QUOTA_SECONDS:-1800}"
 PAUSE_ON_GITHUB_RATE_LIMIT_SECONDS="${PAUSE_ON_GITHUB_RATE_LIMIT_SECONDS:-900}"
+MANAGER_INTERVAL_SECONDS="${MANAGER_INTERVAL_SECONDS:-900}"
+MANAGER_MODEL="${MANAGER_MODEL:-gpt-5.4}"
+MANAGER_EFFORT="${MANAGER_EFFORT:-high}"
 CODEX_PROGRESS_TIMEOUT_SECONDS="${CODEX_PROGRESS_TIMEOUT_SECONDS:-600}"
 CODEX_ABSOLUTE_TIMEOUT_SECONDS="${CODEX_ABSOLUTE_TIMEOUT_SECONDS:-0}"
 CODEX_MODEL="${CODEX_MODEL:-gpt-5.4}"
@@ -243,6 +246,25 @@ worker_field() {
   jq -r --arg k "$key" '.[$k] // empty' "$wfile" 2>/dev/null
 }
 
+sanitize_pr_url() {
+  local raw="${1:-}"
+  printf '%s\n' "$raw" | tr '\r' '\n' | grep -Eo 'https://github\.com/[^[:space:]]+/pull/[0-9]+' | tail -n 1 || true
+}
+
+worker_issue_ref() {
+  local num="$1" issue_ref
+  issue_ref=$(worker_field "$num" "issue")
+  if [ -n "$issue_ref" ]; then
+    printf '%s\n' "$issue_ref"
+    return 0
+  fi
+  if [[ "$num" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$num"
+    return 0
+  fi
+  return 1
+}
+
 set_worker() {
   local num="$1" key="$2" val="$3"
   local wfile
@@ -340,10 +362,36 @@ default_base_ref() {
   echo "$base_ref"
 }
 
+managed_branch_name() {
+  local branch="$1"
+  printf 'agentify/manage/%s\n' "${branch//\//__}"
+}
+
+ensure_worktree_from_ref() {
+  local wt_path="$1" branch="$2" start_ref="$3" local_target="${4:-false}"
+  local managed_branch
+  managed_branch=$(managed_branch_name "$branch")
+
+  if [ "$local_target" = "true" ]; then
+    if git worktree add -q "$wt_path" "$branch" > /dev/null 2>&1; then
+      printf '%s\n' "$wt_path"
+      return 0
+    fi
+  else
+    if git worktree add -q -b "$branch" "$wt_path" "$start_ref" > /dev/null 2>&1; then
+      printf '%s\n' "$wt_path"
+      return 0
+    fi
+  fi
+
+  git worktree add -q -B "$managed_branch" "$wt_path" "$start_ref" > /dev/null 2>&1 || return 1
+  printf '%s\n' "$wt_path"
+}
+
 create_worktree() {
   local branch="$1"
   local wt_path="$WORKTREE_DIR/$branch"
-  local base_ref=""
+  local base_ref="" remote_ref=""
 
   if [ -d "$wt_path" ] && git -C "$wt_path" rev-parse --verify HEAD > /dev/null 2>&1; then
     echo "$wt_path"
@@ -354,8 +402,13 @@ create_worktree() {
   git fetch origin -q > /dev/null 2>&1
 
   if git rev-parse --verify "$branch" > /dev/null 2>&1; then
-    git worktree add "$wt_path" "$branch" -q > /dev/null 2>&1 || return 1
-    echo "$wt_path"
+    ensure_worktree_from_ref "$wt_path" "$branch" "$branch" "true" || return 1
+    return 0
+  fi
+
+  remote_ref="origin/$branch"
+  if git rev-parse --verify "$remote_ref" > /dev/null 2>&1; then
+    ensure_worktree_from_ref "$wt_path" "$branch" "$remote_ref" || return 1
     return 0
   fi
 
@@ -363,15 +416,17 @@ create_worktree() {
   [ -n "$base_ref" ] || return 1
 
   git rev-parse --verify "$base_ref" > /dev/null 2>&1 || return 1
-  git worktree add "$wt_path" -b "$branch" "$base_ref" -q > /dev/null 2>&1 || return 1
-  echo "$wt_path"
+  ensure_worktree_from_ref "$wt_path" "$branch" "$base_ref" || return 1
 }
 
 cleanup_worktree() {
   local branch="$1"
   local wt_path="$WORKTREE_DIR/$branch"
+  local managed_branch
+  managed_branch=$(managed_branch_name "$branch")
   [ -d "$wt_path" ] && git worktree remove "$wt_path" --force 2>/dev/null
   git branch -D "$branch" -q > /dev/null 2>&1 || true
+  git branch -D "$managed_branch" -q > /dev/null 2>&1 || true
   git push origin --delete "$branch" -q > /dev/null 2>&1 || true
 }
 
@@ -482,11 +537,13 @@ existing_pr_url_for_branch() {
 
 complete_worker_success() {
   local num="$1" branch="$2" worker_log="$3" merged_msg="$4" event_msg="$5"
+  local issue_ref
   wlog "$num" "${C_GREEN}${merged_msg}"
   write_worker_log "$worker_log" "$event_msg"
   emit "pr_merged" "[#$num] $event_msg"
   increment_global "completed"
-  gh issue edit "$num" --remove-label "agent-wip" --remove-label "agent" > /dev/null 2>&1 || true
+  issue_ref=$(worker_issue_ref "$num" || true)
+  [ -z "$issue_ref" ] || gh issue edit "$issue_ref" --remove-label "agent-wip" --remove-label "agent" > /dev/null 2>&1 || true
   cleanup_worktree "$branch"
   remove_worker "$num"
   return 0
@@ -504,12 +561,56 @@ mark_worker_resumable_failure() {
 
 mark_worker_blocked_for_human() {
   local num="$1" phase="$2" message="$3" worker_log="$4"
+  local issue_ref
   set_worker "$num" "phase" "$phase"
   set_worker "$num" "last_error" "$message"
   write_worker_log "$worker_log" "$message"
   emit "$phase" "[#$num] $message"
-  gh issue edit "$num" --remove-label "agent-wip" > /dev/null 2>&1 || true
+  issue_ref=$(worker_issue_ref "$num" || true)
+  [ -z "$issue_ref" ] || gh issue edit "$issue_ref" --remove-label "agent-wip" > /dev/null 2>&1 || true
   return 1
+}
+
+infer_issue_ref_for_pr() {
+  local branch="$1" body="$2" explicit_issue="${3:-}" issue_ref=""
+  if [ -n "$explicit_issue" ]; then
+    printf '%s\n' "$explicit_issue"
+    return 0
+  fi
+
+  if [[ "$branch" =~ ^agent/issue-([0-9]+)$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+
+  issue_ref=$(printf '%s\n' "$body" | perl -ne 'if (/(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/) { print $1; exit 0 }')
+  [ -z "$issue_ref" ] || printf '%s\n' "$issue_ref"
+}
+
+adopt_pr_for_management() {
+  local pr_ref="$1" explicit_issue="${2:-}"
+  local pr_json pr_number title branch pr_url worker_id worker_log issue_ref
+
+  pr_json=$(gh pr view "$pr_ref" --json number,title,url,state,mergeStateStatus,headRefName,body 2>/dev/null) || return 1
+  pr_number=$(echo "$pr_json" | jq -r '.number')
+  title=$(echo "$pr_json" | jq -r '.title // ""')
+  branch=$(echo "$pr_json" | jq -r '.headRefName // ""')
+  pr_url=$(echo "$pr_json" | jq -r '.url // ""')
+  issue_ref=$(infer_issue_ref_for_pr "$branch" "$(echo "$pr_json" | jq -r '.body // ""')" "$explicit_issue" || true)
+  worker_id="pr-$pr_number"
+  worker_log=$(worker_log_file "$worker_id")
+
+  set_worker "$worker_id" "issue" "$issue_ref"
+  set_worker "$worker_id" "title" "$title"
+  set_worker "$worker_id" "branch" "$branch"
+  set_worker "$worker_id" "pr_url" "$pr_url"
+  set_worker "$worker_id" "pr_number" "$pr_number"
+  set_worker "$worker_id" "subject_type" "pr"
+  set_worker "$worker_id" "phase" "merge_blocked"
+  set_worker "$worker_id" "log_file" "$worker_log"
+  write_worker_log "$worker_log" "Adopted existing PR #$pr_number for manager on branch $branch"
+  emit "manage_adopted" "[#$worker_id] Adopted PR #$pr_number for manager"
+  printf '%s\n' "$worker_id"
 }
 
 prepare_branch_for_handoff() {
@@ -563,8 +664,14 @@ ensure_pr_for_branch() {
     write_worker_log "$worker_log" "Reusing existing PR $pr_url"
   fi
 
+  pr_url=$(sanitize_pr_url "$pr_url")
+  if [ -z "$pr_url" ]; then
+    mark_worker_resumable_failure "$num" "pr" "Unable to determine PR URL for $branch" "$worker_log"
+    return 1
+  fi
+
   set_worker "$num" "pr_url" "$pr_url"
-  wlog "$num" "PR: $pr_url"
+  wlog "$num" "PR: $pr_url" >&2
   write_worker_log "$worker_log" "Opened PR $pr_url"
   emit "pr_created" "[#$num] $pr_url"
   printf '%s\n' "$pr_url"
@@ -818,13 +925,19 @@ resume_worker() {
   title=$(worker_field "$num" "title")
   branch=$(worker_field "$num" "branch")
   worker_log=$(worker_field "$num" "log_file")
-  pr_url=$(worker_field "$num" "pr_url")
+  pr_url=$(sanitize_pr_url "$(worker_field "$num" "pr_url")")
   review_text=$(worker_field "$num" "review_feedback")
 
   [ -n "$worker_log" ] || worker_log=$(worker_log_file "$num")
   [ -n "$phase" ] || phase="coding"
 
-  if [ "$phase" = "merge_blocked" ] || [ "$phase" = "human_review" ] || [ "$phase" = "ci_failed" ]; then
+  if [ "$phase" = "managing" ]; then
+    phase=$(worker_field "$num" "manager_previous_phase")
+    [ -n "$phase" ] || phase="merge_blocked"
+    set_worker "$num" "phase" "$phase"
+  fi
+
+  if [ "$phase" = "merge_blocked" ] || [ "$phase" = "human_review" ] || [ "$phase" = "ci_failed" ] || [ "$phase" = "awaiting_human_conflict_resolution" ]; then
     return 0
   fi
 
@@ -851,7 +964,8 @@ resume_worker() {
       run_post_coding_pipeline "$num" "$ISSUE_TITLE" "$branch" "$wt_path" "$worker_log"
       ;;
     ci)
-      [ -n "$pr_url" ] || pr_url=$(existing_pr_url_for_branch "$branch")
+      [ -n "$pr_url" ] || pr_url=$(sanitize_pr_url "$(existing_pr_url_for_branch "$branch")")
+      [ -n "$pr_url" ] && set_worker "$num" "pr_url" "$pr_url"
       [ -n "$pr_url" ] || {
         mark_worker_resumable_failure "$num" "pr" "Missing PR while resuming CI for $branch" "$worker_log"
         return 1
@@ -859,7 +973,8 @@ resume_worker() {
       run_ci_phase "$num" "$ISSUE_TITLE" "$branch" "$wt_path" "$worker_log" "$pr_url"
       ;;
     reviewing)
-      [ -n "$pr_url" ] || pr_url=$(existing_pr_url_for_branch "$branch")
+      [ -n "$pr_url" ] || pr_url=$(sanitize_pr_url "$(existing_pr_url_for_branch "$branch")")
+      [ -n "$pr_url" ] && set_worker "$num" "pr_url" "$pr_url"
       [ -n "$pr_url" ] || {
         mark_worker_resumable_failure "$num" "pr" "Missing PR while resuming review for $branch" "$worker_log"
         return 1
@@ -867,7 +982,8 @@ resume_worker() {
       run_review_phase "$num" "$ISSUE_TITLE" "$branch" "$wt_path" "$worker_log" "$pr_url"
       ;;
     retrying)
-      [ -n "$pr_url" ] || pr_url=$(existing_pr_url_for_branch "$branch")
+      [ -n "$pr_url" ] || pr_url=$(sanitize_pr_url "$(existing_pr_url_for_branch "$branch")")
+      [ -n "$pr_url" ] && set_worker "$num" "pr_url" "$pr_url"
       [ -n "$pr_url" ] || {
         mark_worker_resumable_failure "$num" "pr" "Missing PR while resuming retry for $branch" "$worker_log"
         return 1
@@ -875,7 +991,8 @@ resume_worker() {
       run_retry_phase "$num" "$ISSUE_TITLE" "$branch" "$wt_path" "$worker_log" "$pr_url" "$review_text"
       ;;
     merging)
-      [ -n "$pr_url" ] || pr_url=$(existing_pr_url_for_branch "$branch")
+      [ -n "$pr_url" ] || pr_url=$(sanitize_pr_url "$(existing_pr_url_for_branch "$branch")")
+      [ -n "$pr_url" ] && set_worker "$num" "pr_url" "$pr_url"
       [ -n "$pr_url" ] || {
         mark_worker_resumable_failure "$num" "pr" "Missing PR while resuming merge for $branch" "$worker_log"
         return 1
@@ -884,6 +1001,119 @@ resume_worker() {
       ;;
     *)
       work_issue "$issue_json"
+      ;;
+  esac
+}
+
+manager_phase_eligible() {
+  case "$1" in
+    merge_blocked|human_review|ci_failed)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+manager_backoff_elapsed() {
+  local num="$1" now last next_after
+  now=$(date +%s)
+  last=$(worker_field "$num" "manager_last_attempt_epoch")
+  next_after=$(worker_field "$num" "manager_next_attempt_epoch")
+
+  [ -n "$next_after" ] && [ "$next_after" -gt "$now" ] && return 1
+  [ -z "$last" ] && return 0
+  [ $((now - last)) -ge "$MANAGER_INTERVAL_SECONDS" ]
+}
+
+manage_issue() {
+  local num="$1"
+  local wfile title branch worker_log result_json status reason next_phase pr_url now next_after previous_phase issue_ref pr_ref
+  wfile=$(worker_state_file "$num")
+  [ -f "$wfile" ] || return 1
+
+  title=$(worker_field "$num" "title")
+  branch=$(worker_field "$num" "branch")
+  worker_log=$(worker_field "$num" "log_file")
+  previous_phase=$(worker_field "$num" "phase")
+  if [ -z "$previous_phase" ] || [ "$previous_phase" = "managing" ]; then
+    previous_phase=$(worker_field "$num" "manager_previous_phase")
+  fi
+  [ -n "$previous_phase" ] || previous_phase="merge_blocked"
+  [ -n "$worker_log" ] || worker_log=$(worker_log_file "$num")
+
+  set_worker "$num" "manager_previous_phase" "$previous_phase"
+  set_worker "$num" "phase" "managing"
+  set_worker "$num" "manager_model" "$MANAGER_MODEL"
+  set_worker "$num" "manager_effort" "$MANAGER_EFFORT"
+  now=$(date +%s)
+  set_worker "$num" "manager_last_attempt_epoch" "$now"
+  set_worker "$num" "manager_status" "running"
+  write_worker_log "$worker_log" "Manager agent started"
+  emit "manage_start" "[#$num] Manager agent running"
+
+  issue_ref=$(worker_issue_ref "$num" || true)
+  pr_ref=$(worker_field "$num" "pr_url")
+  [ -n "$pr_ref" ] || pr_ref=$(worker_field "$num" "pr_number")
+
+  local manage_args=(
+    "$SCRIPT_DIR/manage.mjs"
+    --worker-key "$num"
+    --repo "$(pwd)"
+    --agentify-dir "$AGENTIFY_DIR"
+    --default-next-phase "$previous_phase"
+    --prompt "$PROMPTS_DIR/manage.md"
+  )
+  [ -z "$issue_ref" ] || manage_args+=(--issue "$issue_ref")
+  [ -z "$pr_ref" ] || manage_args+=(--pr "$pr_ref")
+
+  if ! result_json=$(node "${manage_args[@]}" 2>> "$worker_log"); then
+    if worker_log_has_github_rate_limit_error "$worker_log"; then
+      pause_dispatch_for_github_rate_limit "$num" "$title" "$worker_log"
+    fi
+    set_worker "$num" "manager_status" "failed"
+    mark_worker_resumable_failure "$num" "$previous_phase" "Manager agent failed for issue #$num" "$worker_log"
+    return 1
+  fi
+
+  status=$(echo "$result_json" | jq -r '.status // "no_action"')
+  reason=$(echo "$result_json" | jq -r '.reason // ""')
+  next_phase=$(echo "$result_json" | jq -r --arg previous_phase "$previous_phase" '.next_phase // $previous_phase')
+  pr_url=$(echo "$result_json" | jq -r '.snapshot.pr.url // .snapshot.pr_url // empty')
+  [ -n "$pr_url" ] && set_worker "$num" "pr_url" "$pr_url"
+  set_worker "$num" "manager_status" "$status"
+  [ -n "$reason" ] && set_worker "$num" "last_error" "$reason"
+
+  case "$status" in
+    resolved)
+      if [ -n "$pr_url" ] && gh pr view "$pr_url" --json state -q '.state' 2>> "$worker_log" | grep -qx "MERGED"; then
+        complete_worker_success "$num" "$branch" "$worker_log" "Managed resolution complete" "Merged via manager"
+        return 0
+      fi
+      set_worker "$num" "phase" "merging"
+      write_worker_log "$worker_log" "Manager reported resolved but PR is not merged yet; leaving in merging"
+      return 0
+      ;;
+    blocked)
+      mark_worker_blocked_for_human "$num" "$next_phase" "$reason" "$worker_log"
+      return 1
+      ;;
+    retry_later)
+      next_after=$((now + MANAGER_INTERVAL_SECONDS))
+      set_worker "$num" "phase" "$next_phase"
+      set_worker "$num" "manager_next_attempt_epoch" "$next_after"
+      write_worker_log "$worker_log" "Manager deferred follow-up until $(epoch_to_iso "$next_after")"
+      emit "manage_deferred" "[#$num] Manager deferred further action"
+      return 0
+      ;;
+    *)
+      set_worker "$num" "phase" "$next_phase"
+      next_after=$((now + MANAGER_INTERVAL_SECONDS))
+      set_worker "$num" "manager_next_attempt_epoch" "$next_after"
+      write_worker_log "$worker_log" "Manager finished with no action: $reason"
+      emit "manage_done" "[#$num] Manager finished without action"
+      return 0
       ;;
   esac
 }
@@ -1071,7 +1301,7 @@ resume_orphaned_workers() {
 
     is_issue_claimed "$num" && continue
     case "$phase" in
-      merge_blocked|human_review|ci_failed)
+      merge_blocked|human_review|ci_failed|awaiting_human_conflict_resolution)
         continue
         ;;
     esac
@@ -1082,6 +1312,34 @@ resume_orphaned_workers() {
     slots=$((slots - 1))
     [ "$slots" -le 0 ] && break
   done
+
+  return 0
+}
+
+spawn_management_workers() {
+  local slots="${1:-0}"
+  [ "$slots" -le 0 ] && return 0
+
+  for wfile in "$WORKERS_DIR"/*.json; do
+    [ -f "$wfile" ] || continue
+
+    local num phase title
+    num=$(basename "$wfile" .json)
+    phase=$(jq -r '.phase // "coding"' "$wfile" 2>/dev/null || echo "coding")
+    title=$(jq -r '.title // ""' "$wfile" 2>/dev/null || echo "")
+
+    manager_phase_eligible "$phase" || continue
+    manager_backoff_elapsed "$num" || continue
+    is_issue_claimed "$num" && continue
+
+    log "${C_YELLOW}Manager taking #$num: ${title:-issue $num} (${phase})"
+    manage_issue "$num" &
+    echo "$!" > "$WORKERS_DIR/$num.pid"
+    slots=$((slots - 1))
+    [ "$slots" -le 0 ] && break
+  done
+
+  return 0
 }
 
 main_loop() {
@@ -1121,7 +1379,14 @@ main_loop() {
     local slots
     slots=$((MAX_CONCURRENT - active))
     if [ "$slots" -gt 0 ]; then
+      spawn_management_workers "$slots"
+      active=$(active_worker_count)
+      slots=$((MAX_CONCURRENT - active))
+    fi
+    if [ "$slots" -gt 0 ]; then
       resume_orphaned_workers "$slots"
+      active=$(active_worker_count)
+      slots=$((MAX_CONCURRENT - active))
     fi
     recover_orphaned_wip_issues "runtime"
 

@@ -49,7 +49,9 @@ load_env_file() {
 [ -f "$AGENT_ENV_FILE" ] && load_env_file "$AGENT_ENV_FILE"
 
 if [ -z "${GIT_CONFIG_GLOBAL:-}" ] && [ -d "${HOME}/.gitconfig" ]; then
-  export GIT_CONFIG_GLOBAL=/dev/null
+  export GIT_CONFIG_GLOBAL="${HOME}/.config/agentify/gitconfig"
+  mkdir -p "$(dirname "$GIT_CONFIG_GLOBAL")"
+  touch "$GIT_CONFIG_GLOBAL"
 fi
 
 # Colors
@@ -69,6 +71,8 @@ Commands:
   run          Start the agent loop (from inside a git repo)
   plan "desc"  Plan an epic (Claude + GPT-5.4 dialectic)
   group        Group existing issues into epic proposals
+  manage N     Run the management agent for a stuck issue
+  manage --pr N  Adopt and manage an existing blocked PR
   approve ID   Approve all proposed issues for an epic
   triage       Review existing issues and assign to agent or skip
   init         Create agent/agent-wip/agent-skip labels
@@ -82,6 +86,9 @@ Options:
   --port N             Dashboard port (default: 4242)
   --codex-model M      Codex model (default: gpt-5.4)
   --codex-effort L     Reasoning effort: low, medium, high (default: high)
+  --manager-model M    Manager model (default: gpt-5.4)
+  --manager-effort L   Manager reasoning effort (default: high)
+  --pr N               Pull request number/URL for `manage`
   --claude-model M     Claude model (default: claude-opus-4-6)
   --concurrency N      Parallel workers (default: 3)
   --no-dashboard       Skip the dashboard
@@ -110,7 +117,7 @@ require_repo() {
 
 require_tools() {
   local missing=()
-  for cmd in gh codex claude jq; do
+  for cmd in gh codex claude jq node; do
     command -v "$cmd" > /dev/null 2>&1 || missing+=("$cmd")
   done
   if [ ${#missing[@]} -gt 0 ]; then
@@ -120,10 +127,15 @@ require_tools() {
 }
 
 require_gh_auth() {
-  if ! gh auth status > /dev/null 2>&1; then
-    echo "GitHub auth is missing or invalid. Set GH_TOKEN for the agent environment."
-    exit 1
+  if gh auth status > /dev/null 2>&1; then
+    return 0
   fi
+  if [ -n "${GH_TOKEN:-}" ] && env -u GH_TOKEN gh auth status > /dev/null 2>&1; then
+    unset GH_TOKEN
+    return 0
+  fi
+  echo "GitHub auth is missing or invalid. Set GH_TOKEN for the agent environment."
+  exit 1
 }
 
 ensure_git_transport_auth() {
@@ -260,37 +272,46 @@ cmd_run() {
 
   trap cleanup SIGINT SIGTERM
 
-  source "$LIB_DIR/loop.sh"
-  main_loop
+  bash "$LIB_DIR/run-loop.sh"
 }
 
 # -- Parse args --
 COMMAND=""
+POSITIONAL_ARGS=()
 MAX_RUNS=0
 POLL_INTERVAL=60
 MAX_CONCURRENT=3
 NO_DASHBOARD="false"
 CODEX_MODEL="gpt-5.4"
 CODEX_EFFORT="high"
+MANAGER_MODEL="gpt-5.4"
+MANAGER_EFFORT="high"
+MANAGE_PR=""
 CLAUDE_MODEL="claude-opus-4-6"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    run|init|test|dashboard|status|plan|group|approve|triage) COMMAND="$1"; shift ;;
+    run|init|test|dashboard|status|plan|group|manage|approve|triage) COMMAND="$1"; shift ;;
     --max-runs)      shift; MAX_RUNS="$1"; shift ;;
     --poll)          shift; POLL_INTERVAL="$1"; shift ;;
     --port)          shift; DASHBOARD_PORT="$1"; shift ;;
     --concurrency)   shift; MAX_CONCURRENT="$1"; shift ;;
     --codex-model)   shift; CODEX_MODEL="$1"; shift ;;
     --codex-effort)  shift; CODEX_EFFORT="$1"; shift ;;
+    --manager-model) shift; MANAGER_MODEL="$1"; shift ;;
+    --manager-effort) shift; MANAGER_EFFORT="$1"; shift ;;
+    --pr)            shift; MANAGE_PR="$1"; shift ;;
     --claude-model)  shift; CLAUDE_MODEL="$1"; shift ;;
     --no-dashboard)  NO_DASHBOARD="true"; shift ;;
     -h|--help) usage ;;
-    *) echo "Unknown: $1"; usage ;;
+    *)
+      POSITIONAL_ARGS+=("$1")
+      shift
+      ;;
   esac
 done
 
-export MAX_RUNS POLL_INTERVAL MAX_CONCURRENT CODEX_MODEL CODEX_EFFORT CLAUDE_MODEL
+export MAX_RUNS POLL_INTERVAL MAX_CONCURRENT CODEX_MODEL CODEX_EFFORT MANAGER_MODEL MANAGER_EFFORT CLAUDE_MODEL
 
 [ -z "$COMMAND" ] && usage
 
@@ -379,17 +400,48 @@ cmd_triage() {
   echo "Or label manually:  gh issue edit <num> --add-label agent"
 }
 
+cmd_manage() {
+  require_repo
+  require_tools
+  ensure_codex_auth
+  require_gh_auth
+  ensure_git_transport_auth
+  ensure_git_identity
+  local num="${1:-}"
+  if [ -z "$num" ] && [ -z "$MANAGE_PR" ]; then
+    echo "Usage: agentify manage <issue-number>"
+    echo "   or: agentify manage --pr <pull-request>"
+    exit 1
+  fi
+
+  mkdir -p .agentify
+  [ -f .agentify/state.json ] || echo '{}' > .agentify/state.json
+  [ -f .agentify/events.jsonl ] || touch .agentify/events.jsonl
+
+  source "$LIB_DIR/loop.sh"
+  if [ -n "$MANAGE_PR" ]; then
+    num=$(adopt_pr_for_management "$MANAGE_PR" "$num") || {
+      echo "Unable to adopt PR $MANAGE_PR for management"
+      exit 1
+    }
+  fi
+  manage_issue "$num" || {
+    echo "Unable to manage $num"
+    exit 1
+  }
+}
+
 # Grab remaining positional arg for plan/approve
 POSITIONAL=""
 case "$COMMAND" in
-  plan)      POSITIONAL="${1:-}"; shift 2>/dev/null || true ;;
-  approve)   POSITIONAL="${1:-}"; shift 2>/dev/null || true ;;
+  plan|approve|manage) POSITIONAL="${POSITIONAL_ARGS[0]:-}" ;;
 esac
 
 case "$COMMAND" in
   run)       cmd_run ;;
   plan)      cmd_plan "$POSITIONAL" ;;
   group)     cmd_group ;;
+  manage)    cmd_manage "$POSITIONAL" ;;
   approve)   cmd_approve "$POSITIONAL" ;;
   triage)    cmd_triage ;;
   init)      cmd_init ;;

@@ -638,7 +638,7 @@ advance_existing_issue_epics() {
         local next_wave_numbers
         next_wave_numbers=$(jq -r ".proposals[$i].waves[$started][]?" "$epic_file")
         for num in $next_wave_numbers; do
-          gh issue edit "$num" --add-label "agent" 2>/dev/null
+          gh issue edit "$num" --add-label "agent" > /dev/null 2>&1
         done
 
         local tmp=$(mktemp)
@@ -691,6 +691,8 @@ advance_existing_issue_epics() {
       fi
     fi
   done
+
+  return 0
 }
 
 check_epic_completion() {
@@ -727,4 +729,6 @@ check_epic_completion() {
       jq '.status = "complete"' "$epic_file" > "$tmp" && mv "$tmp" "$epic_file"
     fi
   done
+
+  return 0
 }

@@ -1,0 +1,8 @@
+{
+  "name": "agentify",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "openai": "^6.27.0"
+  }
+}

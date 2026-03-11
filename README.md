@@ -90,9 +90,11 @@ Point agentify at a repo with existing issues:
 
 ```bash
 git clone https://github.com/hadoopjax/agentify.git
-export PATH="$PATH:$(pwd)/agentify/bin"
+cd agentify
+npm install
+export PATH="$PATH:$(pwd)/bin"
 
-# Requires: gh, codex, claude, jq, python3
+# Requires: gh, codex, claude, jq, node, python3
 cd your-repo
 
 # Add agent-only keys
@@ -113,6 +115,8 @@ agentify loads `.agentify/agent.env` only. Keep agent credentials separate from 
 
 ```bash
 git clone https://github.com/hadoopjax/agentify.git
+cd agentify
+npm install
 cd your-repo
 
 # Add agent-only keys
@@ -137,6 +141,8 @@ Dashboard at `http://localhost:4242`. With Tailscale, accessible from any device
 agentify run              Start the loop + dashboard
 agentify plan "desc"      Plan an epic (Claude + GPT-5.4 dialectic)
 agentify group            Group existing issues into epic proposals
+agentify manage <issue>   Run the manager for a blocked worker
+agentify manage --pr <pr> Adopt and manage an existing blocked PR
 agentify approve <id>     Approve all pending issues for an epic
 agentify triage           Review existing issues — assign or skip
 agentify init             Create agent/agent-wip/agent-skip labels
@@ -154,9 +160,27 @@ agentify status           Show state + recent activity
 --port N             Dashboard port (default: 4242)
 --codex-model M      Codex model (default: gpt-5.4)
 --codex-effort L     Reasoning effort: low, medium, high (default: high)
+--manager-model M    Manager model (default: gpt-5.4)
+--manager-effort L   Manager reasoning effort (default: high)
+--pr N               Pull request number/URL for `manage`
 --claude-model M     Claude model (default: claude-opus-4-6)
 --no-dashboard       Skip the dashboard
 ```
+
+## Manager
+
+Use the manager in two modes:
+
+1. `agentify manage <issue>`
+   Re-run management for an existing blocked worker already tracked in `.agentify/workers/`.
+2. `agentify manage --pr <pr>`
+   Adopt an existing dirty PR into manager state even if agentify did not create it originally.
+
+Notes:
+- adopted PR workers are stored locally as `pr-<number>` under `.agentify/workers/`
+- if the PR branch is already checked out in your main repo, agentify creates a temporary local branch like `agentify/manage/...` inside its own worktree so it does not hijack your active checkout
+- pushes still go back to the original remote PR branch
+- manager API calls use a request timeout controlled by `MANAGER_RESPONSE_TIMEOUT_MS` (default: 3 minutes)
 
 ## Per-repo config
 

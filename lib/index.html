@@ -308,6 +308,50 @@
   /* Epics */
   .epic-card { padding: 20px 24px; }
 
+  .epics-summary {
+    margin: 6px 0 14px;
+    font-size: 12px;
+    color: var(--text-tertiary);
+  }
+
+  .epic-lane + .epic-lane { margin-top: 18px; }
+
+  .epic-lane-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+
+  .epic-lane-title {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+  }
+
+  .epic-lane-count {
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+
+  .epic-counts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 12px;
+  }
+
+  .epic-count-chip {
+    font-size: 11px;
+    color: var(--text-secondary);
+    background: var(--border-light);
+    border-radius: 999px;
+    padding: 4px 10px;
+  }
+
   .epic-top {
     display: flex;
     align-items: flex-start;
@@ -453,9 +497,9 @@
     color: white;
   }
   .worker-icon-coding { background: var(--teal); }
-  .worker-icon-reviewing { background: var(--coral); }
+  .worker-icon-reviewing, .worker-icon-ci_failed, .worker-icon-merge_blocked, .worker-icon-human_review, .worker-icon-awaiting_human_conflict_resolution { background: var(--coral); }
   .worker-icon-retrying { background: var(--sand); }
-  .worker-icon-pr, .worker-icon-ci { background: var(--violet); }
+  .worker-icon-pr, .worker-icon-ci, .worker-icon-pushing, .worker-icon-managing { background: var(--violet); }
   .worker-icon-merging { background: #2E7D32; }
   .worker-icon-idle, .worker-icon-starting { background: var(--text-tertiary); }
 
@@ -469,9 +513,9 @@
     margin-bottom: 4px;
   }
   .worker-phase-coding { color: var(--teal); }
-  .worker-phase-reviewing { color: var(--coral); }
+  .worker-phase-reviewing, .worker-phase-ci_failed, .worker-phase-merge_blocked, .worker-phase-human_review, .worker-phase-awaiting_human_conflict_resolution { color: var(--coral); }
   .worker-phase-retrying { color: var(--sand); }
-  .worker-phase-pr, .worker-phase-ci { color: var(--violet); }
+  .worker-phase-pr, .worker-phase-ci, .worker-phase-pushing, .worker-phase-managing { color: var(--violet); }
   .worker-phase-merging { color: #2E7D32; }
   .worker-phase-idle, .worker-phase-starting { color: var(--text-tertiary); }
 
@@ -507,6 +551,26 @@
     background: var(--border-light);
     border-radius: 999px;
     padding: 3px 9px;
+  }
+
+  .worker-actions {
+    margin-left: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  .worker-manage-btn {
+    min-width: 84px;
+  }
+
+  .worker-manage-note {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    text-align: right;
+    line-height: 1.4;
   }
 
   /* Empty states */
@@ -796,6 +860,7 @@
 
   <div id="epics-section" class="section" style="display:none">
     <div class="section-head">Epics</div>
+    <div class="epics-summary" id="epics-summary"></div>
     <div id="epics"></div>
   </div>
 
@@ -863,19 +928,22 @@ let currentWorkersCache = {};
 let currentQueueCache = [];
 let selectedLogIssue = null;
 let logPollTimer = null;
+let pendingManageIssues = new Set();
 
 const phaseLabel = {
   idle:'Idle', starting:'Starting', coding:'Coding',
   reviewing:'Reviewing', retrying:'Retrying',
+  managing:'Managing',
   pr:'Opening PR', pushing:'Pushing',
   ci:'CI Checks', ci_failed:'CI Failed',
   merging:'Merging', merge_blocked:'Merge Blocked',
-  human_review:'Needs Human Review'
+  human_review:'Needs Human Review',
+  awaiting_human_conflict_resolution:'Needs Human Conflict Resolution'
 };
 
 const phaseIcon = {
-  coding:'C', reviewing:'R', retrying:'!', pr:'PR', pushing:'↑', ci:'CI', ci_failed:'CI',
-  merging:'M', merge_blocked:'!', human_review:'H',
+  coding:'C', reviewing:'R', retrying:'!', managing:'MG', pr:'PR', pushing:'↑', ci:'CI', ci_failed:'CI',
+  merging:'M', merge_blocked:'!', human_review:'H', awaiting_human_conflict_resolution:'H',
   idle:'~', starting:'...'
 };
 
@@ -887,6 +955,7 @@ const evColor = {
   ci_waiting:'var(--violet)', ci_passed:'var(--teal)', ci_failed:'var(--coral)',
   error:'var(--coral)', idle:'var(--sand)', retry:'var(--sand)',
   merge_blocked:'var(--coral)',
+  manage_start:'var(--violet)', manage_done:'var(--teal)', manage_deferred:'var(--sand)',
   loop_end:'var(--teal)', plan_start:'var(--violet)', plan_done:'var(--violet)',
   plan_claude:'var(--coral)', plan_gpt:'var(--sand)',
   epic_complete:'var(--teal)', issue_approved:'var(--teal)',
@@ -1224,106 +1293,177 @@ async function fetchEpics() {
 function renderEpics(epics) {
   const section = $('epics-section');
   const container = $('epics');
+  const summary = $('epics-summary');
+  const epicWord = n => n === 1 ? 'epic' : 'epics';
 
   if (epics.length === 0) { section.style.display = 'none'; return; }
   section.style.display = '';
 
-  // Rebuild — epics change infrequently, so full rebuild on change is fine
+  const withCounts = epics.map(epic => {
+    const proposals = epic.proposals || [];
+    const counts = {
+      pending: proposals.filter(p => p.status === 'pending').length,
+      accepted: proposals.filter(p => p.status === 'approved').length,
+      complete: proposals.filter(p => p.status === 'complete').length,
+      rejected: proposals.filter(p => p.status === 'rejected').length
+    };
+    let lane = 'active';
+    if (counts.pending > 0) lane = 'needs-approval';
+    else if (epic.status === 'complete') lane = 'complete';
+    return { epic, counts, lane };
+  });
+
+  const summaryCounts = {
+    pending: withCounts.filter(x => x.lane === 'needs-approval').length,
+    active: withCounts.filter(x => x.lane === 'active').length,
+    complete: withCounts.filter(x => x.lane === 'complete').length
+  };
+  summary.textContent =
+    summaryCounts.pending + ' ' + epicWord(summaryCounts.pending) + ' need approval · '
+    + summaryCounts.active + ' active · '
+    + summaryCounts.complete + ' complete. Approve only cards in Needs Approval.';
+
   container.innerHTML = '';
 
-  epics.forEach(epic => {
-    const card = document.createElement('div');
-    card.className = 'card epic-card';
+  const lanes = [
+    { key: 'needs-approval', title: 'Needs Approval' },
+    { key: 'active', title: 'Active' },
+    { key: 'complete', title: 'Complete' }
+  ];
 
-    const approved = epic.proposals.filter(p => p.status === 'approved' || p.status === 'complete');
-    const active = epic.proposals.filter(p => p.status !== 'rejected');
-    const pending = epic.proposals.filter(p => p.status === 'pending');
-    const pct = active.length > 0 ? (approved.length / active.length * 100) : 0;
+  lanes.forEach(lane => {
+    const items = withCounts.filter(x => x.lane === lane.key);
+    if (items.length === 0) return;
 
-    let html = '<div class="epic-top">'
-      + '<div class="epic-title">' + esc(epic.title) + '</div>'
-      + '<span class="badge badge-' + epic.status + '">' + epic.status + '</span>'
+    const laneEl = document.createElement('div');
+    laneEl.className = 'epic-lane';
+
+    laneEl.innerHTML = '<div class="epic-lane-head">'
+      + '<div class="epic-lane-title">' + lane.title + '</div>'
+      + '<div class="epic-lane-count">' + items.length + '</div>'
       + '</div>';
 
-    if (epic.status === 'active' || epic.status === 'complete') {
-      html += '<div class="progress-track"><div class="progress-fill" style="width:' + pct + '%"></div></div>'
-        + '<div class="epic-meta">' + approved.length + ' / ' + active.length + ' issues approved</div>';
-    }
+    const body = document.createElement('div');
 
-    if (epic.claude_notes || epic.gpt_notes) {
-      let notes = '';
-      if (epic.claude_notes) notes += '<strong>Claude:</strong> ' + esc(epic.claude_notes);
-      if (epic.gpt_notes) notes += (notes ? '<br>' : '') + '<strong>GPT-5.4:</strong> ' + esc(epic.gpt_notes);
-      html += '<div class="epic-notes">' + notes + '</div>';
-    }
+    items.forEach(({ epic, counts }) => {
+      const proposals = epic.proposals || [];
+      const decisions = proposals.length - counts.pending;
+      const decisionPct = proposals.length > 0 ? (decisions / proposals.length * 100) : 0;
+      const badge = counts.pending > 0
+        ? { cls: 'planning', label: 'needs approval' }
+        : epic.status === 'complete'
+          ? { cls: 'complete', label: 'complete' }
+          : { cls: 'active', label: 'active' };
 
-    if (pending.length > 0) {
-      html += '<div class="epic-actions">'
-        + '<button class="btn btn-primary btn-sm" onclick="approveAll(\'' + epic.id + '\', this)">Approve all (' + pending.length + ')</button>'
-        + '</div>';
-    }
-
-    if (epic.feedback && epic.feedback.length > 0) {
-      const comments = epic.feedback.slice(0, 3).map(f => esc(f.comment || '')).filter(Boolean);
-      if (comments.length > 0) {
-        html += '<div class="epic-notes"><strong>Review notes:</strong> ' + comments.join('<br>') + '</div>';
-      }
-    }
-
-    if (epic.dropped_groups && epic.dropped_groups.length > 0) {
-      const dropped = epic.dropped_groups.map(g => {
-        const nums = (g.issue_numbers || []).map(n => '#' + n).join(', ');
-        return esc(g.title) + (nums ? ' (' + esc(nums) + ')' : '');
-      });
-      html += '<div class="epic-notes"><strong>Dropped by GPT review:</strong> ' + dropped.join('<br>') + '</div>';
-    }
-
-    if (epic.ungrouped_issue_numbers && epic.ungrouped_issue_numbers.length > 0) {
-      html += '<div class="epic-notes"><strong>Ungrouped:</strong> '
-        + esc(epic.ungrouped_issue_numbers.map(n => '#' + n).join(', '))
-        + '</div>';
-    }
-
-    html += '<div class="proposals">';
-    epic.proposals.forEach((p, i) => {
-      const srcClass = p.source === 'claude' ? 'proposal-src-claude' : 'proposal-src-gpt';
-      const issueNums = (p.issue_numbers || []).map(n => '#' + n).join(', ');
-      const waves = (p.waves || []).map((wave, idx) => 'W' + (idx + 1) + ': ' + wave.map(n => '#' + n).join(', ')).join('  ');
-      html += '<div class="proposal-row">'
-        + '<div class="proposal-info">'
-        + '<div class="proposal-title">' + esc(p.title) + '</div>'
-        + '<div class="proposal-src ' + srcClass + '">' + esc(p.source) + '</div>'
-        + (issueNums ? '<div class="proposal-meta"><span>' + esc(issueNums) + '</span>' + (waves ? '<span>' + esc(waves) + '</span>' : '') + '</div>' : '')
-        + (p.execution_notes ? '<div class="proposal-body">' + esc(p.execution_notes) + '</div>' : '')
-        + '</div>';
-
-      if (p.status === 'pending') {
-        html += '<div class="proposal-btns">'
-          + '<button class="btn btn-primary btn-sm" onclick="approveIssue(\'' + epic.id + '\',' + i + ')">Approve</button>'
-          + '<button class="btn btn-danger btn-sm" onclick="rejectIssue(\'' + epic.id + '\',' + i + ')">Reject</button>'
-          + '</div>';
-      } else if (p.status === 'approved') {
-        if (p.issue_number) {
-          html += '<span class="proposal-done">#' + p.issue_number + '</span>';
-        } else if (p.issue_numbers) {
-          const started = p.started_waves || 0;
-          const total = (p.waves || []).length || 0;
-          html += '<span class="proposal-done">' + started + '/' + total + ' waves</span>';
-        } else {
-          html += '<span class="proposal-done">approved</span>';
-        }
-      } else if (p.status === 'complete') {
-        html += '<span class="proposal-done">complete</span>';
+      let summaryText = '';
+      if (counts.pending > 0) {
+        summaryText = counts.pending + ' proposal' + (counts.pending === 1 ? '' : 's') + ' waiting for approval';
+      } else if (epic.kind === 'existing-issues') {
+        summaryText = counts.accepted + ' accepted · ' + counts.complete + ' complete · ' + counts.rejected + ' rejected';
       } else {
-        html += '<span class="proposal-skip">skipped</span>';
+        summaryText = counts.accepted + ' accepted · ' + counts.complete + ' complete';
       }
 
-      html += '</div>';
-    });
-    html += '</div>';
+      const card = document.createElement('div');
+      card.className = 'card epic-card';
 
-    card.innerHTML = html;
-    container.appendChild(card);
+      let html = '<div class="epic-top">'
+        + '<div class="epic-title">' + esc(epic.title) + '</div>'
+        + '<span class="badge badge-' + badge.cls + '">' + badge.label + '</span>'
+        + '</div>';
+
+      html += '<div class="epic-meta">' + esc(summaryText) + '</div>';
+
+      if (counts.pending > 0) {
+        html += '<div class="progress-track"><div class="progress-fill" style="width:' + decisionPct + '%"></div></div>'
+          + '<div class="epic-meta">' + decisions + ' / ' + proposals.length + ' decisions made</div>';
+      }
+
+      html += '<div class="epic-counts">'
+        + '<span class="epic-count-chip">' + counts.pending + ' pending</span>'
+        + '<span class="epic-count-chip">' + counts.accepted + ' accepted</span>'
+        + '<span class="epic-count-chip">' + counts.complete + ' complete</span>'
+        + '<span class="epic-count-chip">' + counts.rejected + ' rejected</span>'
+        + '</div>';
+
+      if (epic.claude_notes || epic.gpt_notes) {
+        let notes = '';
+        if (epic.claude_notes) notes += '<strong>Claude:</strong> ' + esc(epic.claude_notes);
+        if (epic.gpt_notes) notes += (notes ? '<br>' : '') + '<strong>GPT-5.4:</strong> ' + esc(epic.gpt_notes);
+        html += '<div class="epic-notes">' + notes + '</div>';
+      }
+
+      if (counts.pending > 0) {
+        html += '<div class="epic-actions">'
+          + '<button class="btn btn-primary btn-sm" onclick="approveAll(\'' + epic.id + '\', this)">Approve all (' + counts.pending + ')</button>'
+          + '</div>';
+      }
+
+      if (epic.feedback && epic.feedback.length > 0) {
+        const comments = epic.feedback.slice(0, 3).map(f => esc(f.comment || '')).filter(Boolean);
+        if (comments.length > 0) {
+          html += '<div class="epic-notes"><strong>Review notes:</strong> ' + comments.join('<br>') + '</div>';
+        }
+      }
+
+      if (epic.dropped_groups && epic.dropped_groups.length > 0) {
+        const dropped = epic.dropped_groups.map(g => {
+          const nums = (g.issue_numbers || []).map(n => '#' + n).join(', ');
+          return esc(g.title) + (nums ? ' (' + esc(nums) + ')' : '');
+        });
+        html += '<div class="epic-notes"><strong>Dropped by GPT review:</strong> ' + dropped.join('<br>') + '</div>';
+      }
+
+      if (epic.ungrouped_issue_numbers && epic.ungrouped_issue_numbers.length > 0) {
+        html += '<div class="epic-notes"><strong>Ungrouped:</strong> '
+          + esc(epic.ungrouped_issue_numbers.map(n => '#' + n).join(', '))
+          + '</div>';
+      }
+
+      html += '<div class="proposals">';
+      proposals.forEach((p, i) => {
+        const srcClass = p.source === 'claude' ? 'proposal-src-claude' : 'proposal-src-gpt';
+        const issueNums = (p.issue_numbers || []).map(n => '#' + n).join(', ');
+        const waves = (p.waves || []).map((wave, idx) => 'W' + (idx + 1) + ': ' + wave.map(n => '#' + n).join(', ')).join('  ');
+        html += '<div class="proposal-row">'
+          + '<div class="proposal-info">'
+          + '<div class="proposal-title">' + esc(p.title) + '</div>'
+          + '<div class="proposal-src ' + srcClass + '">' + esc(p.source) + '</div>'
+          + (issueNums ? '<div class="proposal-meta"><span>' + esc(issueNums) + '</span>' + (waves ? '<span>' + esc(waves) + '</span>' : '') + '</div>' : '')
+          + (p.execution_notes ? '<div class="proposal-body">' + esc(p.execution_notes) + '</div>' : '')
+          + '</div>';
+
+        if (p.status === 'pending') {
+          html += '<div class="proposal-btns">'
+            + '<button class="btn btn-primary btn-sm" onclick="approveIssue(\'' + epic.id + '\',' + i + ')">Approve</button>'
+            + '<button class="btn btn-danger btn-sm" onclick="rejectIssue(\'' + epic.id + '\',' + i + ')">Reject</button>'
+            + '</div>';
+        } else if (p.status === 'approved') {
+          if (p.issue_number) {
+            html += '<span class="proposal-done">accepted · #' + p.issue_number + '</span>';
+          } else if (p.issue_numbers) {
+            const started = p.started_waves || 0;
+            const total = (p.waves || []).length || 0;
+            html += '<span class="proposal-done">active · ' + started + '/' + total + ' waves</span>';
+          } else {
+            html += '<span class="proposal-done">accepted</span>';
+          }
+        } else if (p.status === 'complete') {
+          html += '<span class="proposal-done">complete</span>';
+        } else {
+          html += '<span class="proposal-skip">rejected</span>';
+        }
+
+        html += '</div>';
+      });
+      html += '</div>';
+
+      card.innerHTML = html;
+      body.appendChild(card);
+    });
+
+    laneEl.appendChild(body);
+    container.appendChild(laneEl);
   });
 }
 
@@ -1331,6 +1471,48 @@ function esc(s) {
   const d = document.createElement('div');
   d.textContent = s || '';
   return d.innerHTML;
+}
+
+function canManageWorker(worker = {}) {
+  const phase = worker.phase || 'idle';
+  return phase === 'merge_blocked' || phase === 'human_review' || phase === 'ci_failed' || phase === 'awaiting_human_conflict_resolution';
+}
+
+async function triggerManage(issue, btn) {
+  const issueKey = String(issue.workerKey || issue.number || issue.prNumber || '');
+  if (!issueKey || pendingManageIssues.has(issueKey)) return;
+
+  pendingManageIssues.add(issueKey);
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Starting...';
+  }
+
+  try {
+    const res = await fetch('/manage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        number: issue.number || null,
+        pr_number: issue.prNumber || null
+      })
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || ('HTTP ' + res.status));
+  } catch (e) {
+    pendingManageIssues.delete(issueKey);
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Manage';
+    }
+    alert('Manage failed: ' + e.message);
+  }
+}
+
+function workerSubjectLabel(num, worker = {}) {
+  if (worker.issue) return 'Issue #' + worker.issue;
+  if (worker.pr_number) return 'PR #' + worker.pr_number;
+  return 'Issue #' + num;
 }
 
 // -- Workers --
@@ -1380,6 +1562,7 @@ function updateWorkers(workers, state = {}) {
 
   entries.forEach(([num, w]) => {
     const phase = w.phase || 'idle';
+    if (phase === 'managing' || w.active) pendingManageIssues.delete(String(num));
     let card = container.querySelector('.card[data-wk="' + num + '"]');
     const isNew = !card;
 
@@ -1395,12 +1578,31 @@ function updateWorkers(workers, state = {}) {
     card.onclick = () => openWorkerLog(num, w.title || '');
 
     // Update contents only if changed
-    const title = w.title ? '#' + num + ' ' + w.title : '#' + num;
+    const subjectLabel = workerSubjectLabel(num, w);
+    const title = w.title ? subjectLabel + ' ' + w.title : subjectLabel;
     const branch = w.branch || '';
-    const key = phase + '|' + title + '|' + branch;
+    const managing = pendingManageIssues.has(String(num));
+    const key = [
+      phase,
+      title,
+      branch,
+      w.active ? '1' : '0',
+      w.manager_status || '',
+      w.last_error || '',
+      managing ? '1' : '0'
+    ].join('|');
 
     if (card.dataset.key === key) return;
     card.dataset.key = key;
+
+    const manageAction = canManageWorker(w)
+      ? '<div class="worker-actions">'
+        + '<button class="btn btn-ghost btn-sm worker-manage-btn" data-manage-issue="' + esc(num) + '"' + (managing ? ' disabled' : '') + '>'
+        + (managing ? 'Starting...' : 'Manage')
+        + '</button>'
+        + '<div class="worker-manage-note">Reconcile this blocked worker</div>'
+        + '</div>'
+      : '';
 
     card.innerHTML = '<div class="worker-card">'
       + '<div class="worker-icon worker-icon-' + phase + '">' + (phaseIcon[phase] || '?') + '</div>'
@@ -1410,10 +1612,20 @@ function updateWorkers(workers, state = {}) {
       + (branch ? '<div class="worker-branch">' + esc(branch) + '</div>' : '')
       + '<div class="worker-meta">'
       + '<span class="worker-chip">' + (w.active ? 'live' : 'paused') + '</span>'
-      + '<span class="worker-chip">Issue #' + esc(num) + '</span>'
+      + '<span class="worker-chip">' + esc(subjectLabel) + '</span>'
       + (w.worktree ? '<span class="worker-chip">' + esc(w.worktree) + '</span>' : '')
       + '</div>'
-      + '</div></div>';
+      + '</div>'
+      + manageAction
+      + '</div>';
+
+    const manageBtn = card.querySelector('[data-manage-issue]');
+    if (manageBtn) {
+      manageBtn.addEventListener('click', ev => {
+        ev.stopPropagation();
+        triggerManage({ workerKey: num, number: w.issue || '', prNumber: w.pr_number || '' }, manageBtn);
+      });
+    }
   });
 
   prevWorkerKeys = currentKeys;

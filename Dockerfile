@@ -20,6 +20,8 @@ RUN npm install -g @openai/codex @anthropic-ai/claude-code
 
 # agentify
 COPY . /opt/agentify
+WORKDIR /opt/agentify
+RUN npm install --omit=dev
 RUN chmod +x /opt/agentify/bin/agentify /opt/agentify/lib/loop.sh
 ENV PATH="/opt/agentify/bin:$PATH"
 

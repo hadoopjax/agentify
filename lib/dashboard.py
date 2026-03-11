@@ -53,6 +53,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._handle_group_existing()
         elif self.path == "/approve":
             self._handle_approve(body)
+        elif self.path == "/manage":
+            self._handle_manage(body)
         elif self.path == "/reject":
             self._handle_reject(body)
         elif self.path == "/approve-all":
@@ -508,6 +510,31 @@ echo "$epic_id"
                 self._json_response({"error": result.stderr}, 500)
             else:
                 self._json_response({"ok": True, "number": num})
+        except Exception as e:
+            self._json_response({"error": str(e)}, 500)
+
+    def _handle_manage(self, body):
+        num = body.get("number")
+        pr_number = body.get("pr_number")
+        if not num and not pr_number:
+            self._json_response({"error": "No issue number or PR number"}, 400)
+            return
+        try:
+            cmd = [AGENTIFY_BIN, "manage"]
+            if pr_number:
+                cmd.extend(["--pr", str(pr_number)])
+                if num:
+                    cmd.append(str(num))
+            else:
+                cmd.append(str(num))
+            subprocess.Popen(
+                cmd,
+                cwd=os.getcwd(),
+                env={**os.environ, "AGENTIFY_DIR": DATA_DIR},
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self._json_response({"ok": True, "number": num, "pr_number": pr_number})
         except Exception as e:
             self._json_response({"error": str(e)}, 500)
 
