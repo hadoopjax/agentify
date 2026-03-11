@@ -85,7 +85,9 @@ active_worker_count() {
   local count=0
   for pidfile in "$WORKERS_DIR"/*.pid; do
     [ -f "$pidfile" ] || continue
-    kill -0 "$(cat "$pidfile")" 2>/dev/null && ((count++))
+    if kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+      ((++count))
+    fi
   done
   echo "$count"
 }
@@ -96,7 +98,7 @@ reap_workers() {
     local pid=$(cat "$pidfile")
     local num=$(basename "$pidfile" .pid)
     if ! kill -0 "$pid" 2>/dev/null; then
-      wait "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null || true
       rm -f "$pidfile" "$WORKERS_DIR/$num.json"
     fi
   done
@@ -123,8 +125,8 @@ render_prompt() {
   content="${content//\{\{NUM\}\}/$ISSUE_NUM}"
   content="${content//\{\{TITLE\}\}/$ISSUE_TITLE}"
   content="${content//\{\{BODY\}\}/$ISSUE_BODY}"
-  content="${content//\{\{DIFF\}\}/$ISSUE_DIFF}"
-  content="${content//\{\{REVIEW\}\}/$REVIEW_TEXT}"
+  content="${content//\{\{DIFF\}\}/${ISSUE_DIFF-}}"
+  content="${content//\{\{REVIEW\}\}/${REVIEW_TEXT-}}"
   content="${content//\{\{REPO_CONTEXT\}\}/$(repo_context)}"
   echo "$content"
 }
@@ -133,10 +135,26 @@ render_prompt() {
 create_worktree() {
   local branch="$1"
   local wt_path="$WORKTREE_DIR/$branch"
+  local base_ref=""
   [ -d "$wt_path" ] && git worktree remove "$wt_path" --force 2>/dev/null
-  git branch -D "$branch" 2>/dev/null
-  git fetch origin -q 2>/dev/null
-  git worktree add "$wt_path" -b "$branch" origin/main -q 2>/dev/null
+  git branch -D "$branch" -q > /dev/null 2>&1 || true
+  git fetch origin -q > /dev/null 2>&1
+
+  base_ref=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  if [ -z "$base_ref" ]; then
+    local default_branch
+    default_branch=$(gh repo view --json defaultBranchRef -q '.defaultBranchRef.name' 2>/dev/null || true)
+    [ -n "$default_branch" ] && base_ref="origin/$default_branch"
+  fi
+  if [ -z "$base_ref" ]; then
+    local current_branch
+    current_branch=$(git branch --show-current 2>/dev/null || true)
+    [ -n "$current_branch" ] && base_ref="$current_branch"
+  fi
+  [ -n "$base_ref" ] || return 1
+
+  git rev-parse --verify "$base_ref" > /dev/null 2>&1 || return 1
+  git worktree add "$wt_path" -b "$branch" "$base_ref" -q > /dev/null 2>&1 || return 1
   echo "$wt_path"
 }
 
@@ -144,8 +162,8 @@ cleanup_worktree() {
   local branch="$1"
   local wt_path="$WORKTREE_DIR/$branch"
   [ -d "$wt_path" ] && git worktree remove "$wt_path" --force 2>/dev/null
-  git branch -D "$branch" -q 2>/dev/null
-  git push origin --delete "$branch" -q 2>/dev/null
+  git branch -D "$branch" -q > /dev/null 2>&1 || true
+  git push origin --delete "$branch" -q > /dev/null 2>&1 || true
 }
 
 # -- CI --
@@ -188,12 +206,19 @@ work_issue() {
   set_worker "$num" "branch" "$branch"
 
   # Claim: swap labels so dispatcher won't re-pick
-  gh issue edit "$num" --remove-label "agent" --add-label "agent-wip" 2>/dev/null
-  gh issue comment "$num" --body "🤖 Agent picking this up." -q 2>/dev/null
+  gh issue edit "$num" --remove-label "agent" --add-label "agent-wip" > /dev/null 2>&1 || true
+  gh issue comment "$num" --body "🤖 Agent picking this up." > /dev/null 2>&1 || true
 
   # Worktree
   local wt_path
-  wt_path=$(create_worktree "$branch")
+  if ! wt_path=$(create_worktree "$branch"); then
+    wlog "$num" "${C_RED}Worktree setup failed"
+    emit "error" "[#$num] Worktree setup failed"
+    increment_global "errors"
+    gh issue edit "$num" --remove-label "agent-wip" --add-label "agent" > /dev/null 2>&1 || true
+    remove_worker "$num"
+    return 1
+  fi
   set_worker "$num" "worktree" "$wt_path"
   wlog "$num" "${C_DIM}worktree: $wt_path"
 
@@ -204,12 +229,12 @@ work_issue() {
   local code_prompt
   code_prompt=$(render_prompt "code.md")
 
-  if ! (cd "$wt_path" && codex --full-auto --model "$CODEX_MODEL" -c model_reasoning_effort="$CODEX_EFFORT" -q "$code_prompt") 2>/dev/null; then
+  if ! (cd "$wt_path" && codex exec --full-auto --model "$CODEX_MODEL" -c model_reasoning_effort="$CODEX_EFFORT" "$code_prompt") 2>/dev/null; then
     wlog "$num" "${C_RED}Codex failed"
     emit "error" "[#$num] Codex failed"
     increment_global "errors"
     cleanup_worktree "$branch"
-    gh issue edit "$num" --remove-label "agent-wip" --add-label "agent" 2>/dev/null
+    gh issue edit "$num" --remove-label "agent-wip" --add-label "agent" > /dev/null 2>&1 || true
     remove_worker "$num"
     return 1
   fi
@@ -219,9 +244,9 @@ work_issue() {
      [ -z "$(git ls-files --others --exclude-standard)" ]); then
     wlog "$num" "${C_YELLOW}No changes produced"
     emit "coding_done" "[#$num] No changes — needs more detail"
-    gh issue comment "$num" --body "🤖 Couldn't produce changes. May need a more detailed description." -q 2>/dev/null
+    gh issue comment "$num" --body "🤖 Couldn't produce changes. May need a more detailed description." > /dev/null 2>&1 || true
     cleanup_worktree "$branch"
-    gh issue edit "$num" --remove-label "agent-wip" --add-label "agent" 2>/dev/null
+    gh issue edit "$num" --remove-label "agent-wip" --add-label "agent" > /dev/null 2>&1 || true
     remove_worker "$num"
     return 1
   fi
@@ -252,7 +277,7 @@ work_issue() {
   if ! wait_for_ci "$pr_url" "$num"; then
     wlog "$num" "${C_RED}CI failed"
     emit "ci_failed" "[#$num] CI failed"
-    gh pr comment "$pr_url" --body "🤖 CI failed. Leaving PR open." -q 2>/dev/null
+    gh pr comment "$pr_url" --body "🤖 CI failed. Leaving PR open." > /dev/null 2>&1 || true
     local wt_clean="$WORKTREE_DIR/$branch"
     [ -d "$wt_clean" ] && git worktree remove "$wt_clean" --force 2>/dev/null
     remove_worker "$num"
@@ -273,7 +298,7 @@ work_issue() {
   if echo "$review" | grep -q "LGTM"; then
     wlog "$num" "${C_GREEN}LGTM ✓"
     emit "review_done" "[#$num] LGTM ✅"
-    gh pr comment "$pr_url" --body "🤖 **Claude: LGTM** ✅" -q 2>/dev/null
+    gh pr comment "$pr_url" --body "🤖 **Claude: LGTM** ✅" > /dev/null 2>&1 || true
 
     set_worker "$num" "phase" "merging"
     gh pr merge "$pr_url" --squash --delete-branch 2>/dev/null || \
@@ -285,7 +310,7 @@ work_issue() {
 
     local wt_clean="$WORKTREE_DIR/$branch"
     [ -d "$wt_clean" ] && git worktree remove "$wt_clean" --force 2>/dev/null
-    gh issue edit "$num" --remove-label "agent-wip" 2>/dev/null
+    gh issue edit "$num" --remove-label "agent-wip" > /dev/null 2>&1 || true
     remove_worker "$num"
     return 0
   fi
@@ -295,7 +320,7 @@ work_issue() {
   emit "review_done" "[#$num] Changes requested"
   gh pr comment "$pr_url" --body "🤖 **Review:**
 
-$review" -q 2>/dev/null
+$review" > /dev/null 2>&1 || true
 
   set_worker "$num" "phase" "retrying"
   emit "retry" "[#$num] Retrying with review feedback"
@@ -304,7 +329,7 @@ $review" -q 2>/dev/null
   local retry_prompt
   retry_prompt=$(render_prompt "retry.md")
 
-  (cd "$wt_path" && codex --full-auto --model "$CODEX_MODEL" -c model_reasoning_effort="$CODEX_EFFORT" -q "$retry_prompt") 2>/dev/null || true
+  (cd "$wt_path" && codex exec --full-auto --model "$CODEX_MODEL" -c model_reasoning_effort="$CODEX_EFFORT" "$retry_prompt") 2>/dev/null || true
 
   if (cd "$wt_path" && (! git diff --quiet || ! git diff --cached --quiet || \
      [ -n "$(git ls-files --others --exclude-standard)" ])); then
@@ -319,7 +344,7 @@ $review" -q 2>/dev/null
     if echo "$review" | grep -q "LGTM"; then
       wlog "$num" "${C_GREEN}LGTM on retry ✓"
       emit "review_done" "[#$num] LGTM on retry ✅"
-      gh pr comment "$pr_url" --body "🤖 **Claude: LGTM** ✅" -q 2>/dev/null
+      gh pr comment "$pr_url" --body "🤖 **Claude: LGTM** ✅" > /dev/null 2>&1 || true
 
       set_worker "$num" "phase" "merging"
       gh pr merge "$pr_url" --squash --delete-branch 2>/dev/null || \
@@ -331,7 +356,7 @@ $review" -q 2>/dev/null
 
       local wt_clean="$WORKTREE_DIR/$branch"
       [ -d "$wt_clean" ] && git worktree remove "$wt_clean" --force 2>/dev/null
-      gh issue edit "$num" --remove-label "agent-wip" 2>/dev/null
+      gh issue edit "$num" --remove-label "agent-wip" > /dev/null 2>&1 || true
       remove_worker "$num"
       return 0
     fi
@@ -342,7 +367,7 @@ $review" -q 2>/dev/null
   emit "review_done" "[#$num] Still needs work after retry"
   gh pr comment "$pr_url" --body "🤖 **Still needs work:**
 
-$review" -q 2>/dev/null
+$review" > /dev/null 2>&1 || true
 
   local wt_clean="$WORKTREE_DIR/$branch"
   [ -d "$wt_clean" ] && git worktree remove "$wt_clean" --force 2>/dev/null
