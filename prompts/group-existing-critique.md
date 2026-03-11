@@ -26,6 +26,7 @@ Return valid JSON with this exact top-level shape:
 
 Hard rules:
 - Only propose additional groups for issues that are currently ungrouped or clearly missing from the proposal.
+- Only group actionable implementation issues. Do not include tracker or parent issues in `issue_numbers`.
 - Do not duplicate issue numbers already used in an existing group unless your feedback explicitly says the original grouping is wrong.
 - Do not suggest overlapping groups.
 - Focus on parallel safety, dependency mistakes, oversized groups, and unrelated issues being bundled together.

@@ -20,12 +20,13 @@ The output MUST be valid JSON with this exact top-level shape:
 
 Hard rules:
 - Only use issue numbers from the provided issue list.
+- Only group actionable implementation issues. Do not include tracker or parent issues in `issue_numbers`.
 - Never place the same issue in more than one group.
 - Prefer 2-6 issues per group. Leave singletons ungrouped unless grouping adds real value.
 - Group by shared user-facing outcome or subsystem, not by superficial label similarity.
 - Optimize for safe parallel execution by agents.
 - Use `waves` to express execution order.
-- Put issues that can safely run in parallel in the same wave.
+- Be conservative about parallel work. If two issues might touch the same schema, source registry, or normalization layer, put them in different waves.
 - Put blocking or prerequisite work in earlier waves.
 - If you are not confident that issues can run in parallel, separate them into different waves.
 - Do not invent missing requirements or merge unrelated cleanup into a group.

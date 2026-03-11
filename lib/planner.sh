@@ -106,6 +106,7 @@ existing_group_candidates() {
         ($issue.label_names | index("agent")) == null and
         ($issue.label_names | index("agent-wip")) == null and
         ($issue.label_names | index("agent-skip")) == null and
+        ($issue.label_names | index("epic")) == null and
         ($reserved | index($issue.number)) == null
       ))
     | map({
@@ -133,8 +134,10 @@ claude = json.loads(sys.argv[2] or "{}")
 gpt = json.loads(sys.argv[3] or "{}")
 
 valid = {issue["number"] for issue in issues}
+issue_meta = {issue["number"]: issue for issue in issues}
 claimed = set()
 proposals = []
+dropped_groups = []
 
 def as_priority(value):
     value = (value or "medium").lower()
@@ -149,13 +152,12 @@ def normalize_waves(issue_numbers, raw_waves):
       for wave in raw_waves:
         if not isinstance(wave, list):
           continue
-        normalized = []
         for value in wave:
           if isinstance(value, int) and value in allowed and value not in seen:
-            normalized.append(value)
+            # Existing-issue epics run one issue at a time within an epic.
+            # This keeps cross-epic parallelism while avoiding same-subsystem conflicts.
+            waves.append([value])
             seen.add(value)
-        if normalized:
-          waves.append(normalized)
 
     for num in issue_numbers:
       if num not in seen:
@@ -163,12 +165,42 @@ def normalize_waves(issue_numbers, raw_waves):
 
     return waves
 
+feedback = gpt.get("feedback")
+if not isinstance(feedback, list):
+    feedback = []
+
+feedback_by_index = {}
+for item in feedback:
+    if not isinstance(item, dict):
+        continue
+    index = item.get("group_index")
+    comment = (item.get("comment") or "").strip()
+    if isinstance(index, int) and comment:
+        feedback_by_index.setdefault(index, []).append(comment)
+
 def append_groups(groups, source):
     if not isinstance(groups, list):
         return
 
-    for group in groups:
+    for group_index, group in enumerate(groups):
         if not isinstance(group, dict):
+            continue
+
+        if source == "claude" and group_index in feedback_by_index:
+            raw_numbers = group.get("issue_numbers")
+            issue_numbers = []
+            if isinstance(raw_numbers, list):
+                for value in raw_numbers:
+                    labels = issue_meta.get(value, {}).get("labels", [])
+                    if isinstance(value, int) and value in valid and "epic" not in labels and value not in issue_numbers:
+                        issue_numbers.append(value)
+
+            dropped_groups.append({
+                "title": (group.get("title") or "").strip() or f"Dropped group {group_index}",
+                "issue_numbers": issue_numbers,
+                "reasons": feedback_by_index[group_index],
+                "source": source,
+            })
             continue
 
         raw_numbers = group.get("issue_numbers")
@@ -177,7 +209,8 @@ def append_groups(groups, source):
 
         issue_numbers = []
         for value in raw_numbers:
-            if isinstance(value, int) and value in valid and value not in claimed and value not in issue_numbers:
+            labels = issue_meta.get(value, {}).get("labels", [])
+            if isinstance(value, int) and value in valid and "epic" not in labels and value not in claimed and value not in issue_numbers:
                 issue_numbers.append(value)
 
         if len(issue_numbers) < 2:
@@ -210,14 +243,11 @@ for num in requested:
     if num not in ungrouped:
         ungrouped.append(num)
 
-feedback = gpt.get("feedback")
-if not isinstance(feedback, list):
-    feedback = []
-
 print(json.dumps({
     "proposals": proposals,
     "ungrouped_issue_numbers": sorted(set(ungrouped)),
     "feedback": feedback,
+    "dropped_groups": dropped_groups,
     "claude_notes": claude.get("notes") or "",
     "gpt_notes": gpt.get("notes") or ""
 }))
@@ -425,6 +455,7 @@ group_existing_issues() {
     --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --argjson proposals "$(echo "$normalized" | jq '.proposals')" \
     --argjson feedback "$(echo "$normalized" | jq '.feedback')" \
+    --argjson dropped_groups "$(echo "$normalized" | jq '.dropped_groups')" \
     --argjson ungrouped "$(echo "$normalized" | jq '.ungrouped_issue_numbers')" \
     --arg claude_notes "$(echo "$normalized" | jq -r '.claude_notes')" \
     --arg gpt_notes "$(echo "$normalized" | jq -r '.gpt_notes')" \
@@ -436,6 +467,7 @@ group_existing_issues() {
       created_at: $created,
       proposals: $proposals,
       feedback: $feedback,
+      dropped_groups: $dropped_groups,
       ungrouped_issue_numbers: $ungrouped,
       claude_notes: $claude_notes,
       gpt_notes: $gpt_notes
@@ -443,6 +475,8 @@ group_existing_issues() {
 
   local total
   total=$(echo "$normalized" | jq '.proposals | length')
+  local dropped_count
+  dropped_count=$(echo "$normalized" | jq '.dropped_groups | length')
   local ungrouped_count
   ungrouped_count=$(echo "$normalized" | jq '.ungrouped_issue_numbers | length')
   emit "group_done" "Proposed $total epic groups from existing issues"
@@ -450,6 +484,10 @@ group_existing_issues() {
   printf "\n  ${C_BOLD}Existing issue grouping${C_RESET}\n"
   printf "  ${C_DIM}ID: $epic_id${C_RESET}\n\n"
   echo "$normalized" | jq -r '.proposals[] | "  [\(.source)] \(.title) — \(.issue_numbers | map("#" + tostring) | join(", "))"'
+  if [ "$dropped_count" -gt 0 ]; then
+    printf "\n  ${C_YELLOW}%s flagged groups were dropped by GPT review${C_RESET}\n" "$dropped_count"
+    echo "$normalized" | jq -r '.dropped_groups[] | "  [dropped] \(.title) — \(.issue_numbers | map("#" + tostring) | join(", "))"'
+  fi
   printf "\n  ${C_DIM}%s ungrouped issues remain${C_RESET}\n" "$ungrouped_count"
   printf "  Approve groups in the dashboard: ${C_TEAL}http://localhost:${DASHBOARD_PORT:-4242}${C_RESET}\n"
   printf "  Or: ${C_DIM}agentify approve $epic_id${C_RESET}\n\n"

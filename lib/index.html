@@ -882,6 +882,14 @@ function renderEpics(epics) {
       }
     }
 
+    if (epic.dropped_groups && epic.dropped_groups.length > 0) {
+      const dropped = epic.dropped_groups.map(g => {
+        const nums = (g.issue_numbers || []).map(n => '#' + n).join(', ');
+        return esc(g.title) + (nums ? ' (' + esc(nums) + ')' : '');
+      });
+      html += '<div class="epic-notes"><strong>Dropped by GPT review:</strong> ' + dropped.join('<br>') + '</div>';
+    }
+
     if (epic.ungrouped_issue_numbers && epic.ungrouped_issue_numbers.length > 0) {
       html += '<div class="epic-notes"><strong>Ungrouped:</strong> '
         + esc(epic.ungrouped_issue_numbers.map(n => '#' + n).join(', '))

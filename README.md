@@ -54,6 +54,8 @@ Point agentify at a repo with existing issues:
 4. Existing issues in a grouped proposal are reserved locally so triage will not assign them twice
 5. Approving a grouped epic starts only its first execution wave by labeling those issues `agent`
 6. Later waves unlock automatically after the prior wave closes
+7. Existing-issue epics execute one issue at a time within each epic, so different epics can run in parallel without same-epic merge collisions
+8. If GPT flags a Claude group as unsafe, agentify drops that group and returns its issues to the ungrouped pool instead of proposing it as-is
 
 ### Execution
 
