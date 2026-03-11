@@ -941,7 +941,7 @@ function renderRunSummary(state = {}) {
       .sort((a, b) => Number(a[0]) - Number(b[0]))
       .map(([num, worker]) => {
         const phase = phaseLabel[worker.phase || 'idle'] || (worker.phase || 'idle');
-        return '<button class="run-item run-item-btn" onclick="openWorkerLog(' + Number(num) + ', ' + JSON.stringify(worker.title || '') + ')"><strong>#' + esc(num) + '</strong>' + esc(worker.title || '') + ' · ' + esc(phase) + '</button>';
+        return '<button class="run-item run-item-btn" data-log-issue="' + esc(num) + '" data-log-title="' + esc(worker.title || '') + '"><strong>#' + esc(num) + '</strong>' + esc(worker.title || '') + ' · ' + esc(phase) + '</button>';
       })
       .join('');
   }
@@ -1407,6 +1407,11 @@ fetchTriage();
 $('log-close').addEventListener('click', closeWorkerLog);
 $('log-modal').addEventListener('click', e => {
   if (e.target === $('log-modal')) closeWorkerLog();
+});
+$('run-active-list').addEventListener('click', e => {
+  const btn = e.target.closest('[data-log-issue]');
+  if (!btn) return;
+  openWorkerLog(btn.dataset.logIssue, btn.dataset.logTitle || '');
 });
 window.addEventListener('keydown', e => {
   if (e.key === 'Escape') closeWorkerLog();
