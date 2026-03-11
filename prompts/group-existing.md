@@ -8,10 +8,10 @@ The output MUST be valid JSON with this exact top-level shape:
       "title": "short epic title",
       "summary": "one paragraph summary of the shared goal",
       "priority": "high|medium|low",
-      "issue_numbers": [12, 13, 19],
+      "issue_numbers": [12, 13],
       "rationale": "why these issues belong together",
       "execution_notes": "how to run these safely; call out sequencing risks",
-      "waves": [[12], [13, 19]]
+      "waves": [[12], [13]]
     }
   ],
   "ungrouped_issue_numbers": [21, 24],
@@ -21,8 +21,9 @@ The output MUST be valid JSON with this exact top-level shape:
 Hard rules:
 - Only use issue numbers from the provided issue list.
 - Only group actionable implementation issues. Do not include tracker or parent issues in `issue_numbers`.
+- Only propose 2-issue groups. If a third issue seems related, leave it ungrouped.
 - Never place the same issue in more than one group.
-- Prefer 2-6 issues per group. Leave singletons ungrouped unless grouping adds real value.
+- Prefer leaving work ungrouped over forcing a weak pair.
 - Group by shared user-facing outcome or subsystem, not by superficial label similarity.
 - Optimize for safe parallel execution by agents.
 - Use `waves` to express execution order.

@@ -35,64 +35,6 @@ compact_issue_digest() {
   '
 }
 
-dropped_group_digest() {
-  local issues_json="$1"
-  local claude_groups_json="$2"
-  local gpt_critique_json="$3"
-
-  python3 - "$issues_json" "$claude_groups_json" "$gpt_critique_json" <<'PY'
-import json
-import sys
-
-issues = json.loads(sys.argv[1] or "[]")
-claude = json.loads(sys.argv[2] or "{}")
-gpt = json.loads(sys.argv[3] or "{}")
-
-issue_meta = {issue["number"]: issue for issue in issues}
-feedback = gpt.get("feedback")
-if not isinstance(feedback, list):
-    feedback = []
-
-dropped = []
-seen_issue_numbers = []
-seen = set()
-
-for item in feedback:
-    if not isinstance(item, dict):
-        continue
-    index = item.get("group_index")
-    if not isinstance(index, int):
-        continue
-    groups = claude.get("groups")
-    if not isinstance(groups, list) or not (0 <= index < len(groups)):
-        continue
-
-    group = groups[index]
-    raw_numbers = group.get("issue_numbers")
-    issue_numbers = []
-    if isinstance(raw_numbers, list):
-        for value in raw_numbers:
-            meta = issue_meta.get(value)
-            labels = meta.get("labels", []) if isinstance(meta, dict) else []
-            if isinstance(value, int) and isinstance(meta, dict) and "epic" not in labels and value not in issue_numbers:
-                issue_numbers.append(value)
-                if value not in seen:
-                    seen.add(value)
-                    seen_issue_numbers.append(value)
-
-    dropped.append({
-        "title": (group.get("title") or "").strip() or f"Dropped group {index}",
-        "issue_numbers": issue_numbers,
-        "reasons": [(item.get("comment") or "").strip()] if (item.get("comment") or "").strip() else []
-    })
-
-print(json.dumps({
-    "dropped_groups": dropped,
-    "issues": [issue_meta[num] for num in seen_issue_numbers if num in issue_meta]
-}))
-PY
-}
-
 extract_json() {
   python3 -c '
 import json
@@ -271,7 +213,7 @@ def append_groups(groups, source):
             if isinstance(value, int) and value in valid and "epic" not in labels and value not in claimed and value not in issue_numbers:
                 issue_numbers.append(value)
 
-        if len(issue_numbers) < 2:
+        if len(issue_numbers) != 2:
             continue
 
         claimed.update(issue_numbers)
@@ -500,33 +442,6 @@ group_existing_issues() {
   gpt_response=$(call_gpt "$critique_template")
   gpt_critique=$(echo "$gpt_response" | extract_json || true)
   [ -n "$gpt_critique" ] || gpt_critique='{"feedback":[],"additional_groups":[],"ungrouped_issue_numbers":[],"notes":""}'
-
-  local dropped_digest
-  dropped_digest=$(dropped_group_digest "$issues_json" "$claude_groups" "$gpt_critique")
-
-  local dropped_issue_count
-  dropped_issue_count=$(echo "$dropped_digest" | jq '.issues | length')
-  if [ "$dropped_issue_count" -ge 2 ]; then
-    log "${C_YELLOW}GPT-5.4 salvaging dropped groups..."
-
-    local salvage_template
-    salvage_template=$(cat "$PROMPTS_DIR/group-existing-salvage.md")
-    salvage_template="${salvage_template//\{\{ISSUES_JSON\}\}/$(echo "$dropped_digest" | jq -c '.issues')}"
-    salvage_template="${salvage_template//\{\{DROPPED_GROUPS_JSON\}\}/$(echo "$dropped_digest" | jq -c '.dropped_groups')}"
-    salvage_template="${salvage_template//\{\{REPO_CONTEXT\}\}/$(repo_context)}"
-
-    local salvage_response salvage_json
-    salvage_response=$(call_gpt "$salvage_template")
-    salvage_json=$(echo "$salvage_response" | extract_json || true)
-    [ -n "$salvage_json" ] || salvage_json='{"replacement_groups":[],"ungrouped_issue_numbers":[],"notes":""}'
-
-    gpt_critique=$(jq -c \
-      --argjson salvage "$salvage_json" \
-      '.additional_groups = ((.additional_groups // []) + ($salvage.replacement_groups // [])) |
-       .ungrouped_issue_numbers = ((.ungrouped_issue_numbers // []) + ($salvage.ungrouped_issue_numbers // [])) |
-       .notes = ([.notes, ($salvage.notes // "")] | map(select(length > 0)) | join(" "))' \
-      <<<"$gpt_critique")
-  fi
 
   local normalized
   normalized=$(normalize_existing_group_plan "$issues_json" "$claude_groups" "$gpt_critique")
