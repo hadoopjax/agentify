@@ -156,6 +156,125 @@ Drop `.agentify/agents.md` in your repo with project-specific context:
 
 Both Codex and Claude see this in every prompt.
 
+## Design lineage
+
+This project is not trying to be "a chatbot that writes code." It is trying to turn
+agentic coding into an operational loop with durable state, clear role boundaries,
+and observable execution.
+
+The main design influences show up in concrete ways:
+
+### 1. Karpathy / `autoresearch`: loop + external state + git as the machine
+
+The core Karpathy idea is that the intelligence should not live only in a single
+prompt transcript. It should operate against durable external state and keep going.
+
+How that materializes here:
+
+- `lib/loop.sh` is the long-running supervisor. It keeps polling for work, spawns
+  workers, reaps them, advances epics, and never assumes a single request/response
+  interaction is the whole system.
+- `.agentify/state.json`, `.agentify/events.jsonl`, `.agentify/workers/`, and
+  `.agentify/epics/` are the durable state machine. If the process restarts, the
+  repo still contains the run state.
+- `git worktree` usage in `lib/loop.sh` makes git itself part of the execution
+  model: each issue gets an isolated branch and worktree instead of mutating the
+  user's checkout directly.
+- `lib/dashboard.py` and `lib/index.html` expose that state back to humans so the
+  loop is inspectable rather than opaque.
+
+Why we do it this way:
+
+- repos are the durable substrate we already trust
+- state should survive process restarts
+- the agent should be observable as a system, not just as a conversation
+
+### 2. Practical agent factory pattern (the Will Brown-style idea): role separation instead of one omni-agent
+
+The second major idea is that planning, coding, and review should not all be done
+by one undifferentiated agent run. Different steps have different failure modes.
+
+How that materializes here:
+
+- `lib/planner.sh` splits planning into a dialectic:
+  - Claude proposes issue breakdowns or existing-issue groups
+  - GPT-5.4 critiques those proposals before anything is approved
+- `prompts/plan.md` and `prompts/plan-critique.md` make planning and critique
+  separate prompt contracts rather than a single fuzzy planning call.
+- `prompts/group-existing.md` and `prompts/group-existing-critique.md` apply the
+  same pattern to grouping existing issues into safe, execution-ready epics.
+- `prompts/code.md` is only for coding.
+- `prompts/review.md` is only for review.
+- `prompts/retry.md` is only for the bounded "fix the review feedback" retry pass.
+
+Why we do it this way:
+
+- planners are good at decomposition, but bad at self-policing scope
+- coders are good at making local changes, but should not be the final judge of
+  correctness
+- review should happen against an actual diff and PR state, not against intent
+
+### 3. Queue, claim, review, merge: software work as an explicit pipeline
+
+This repo treats issues and PRs as the control surface for the system, not as side
+effects after the fact.
+
+How that materializes here:
+
+- `agent`, `agent-wip`, and `agent-skip` labels are the queue protocol.
+- `agentify triage`, `agentify group`, and `agentify approve` move work into or out
+  of that queue in a controlled way.
+- `lib/loop.sh` claims issues by swapping `agent` to `agent-wip`, then opens PRs,
+  waits for CI, requests review, retries once, and merges.
+- `check_epic_completion` and `advance_existing_issue_epics` in `lib/planner.sh`
+  turn epic progress into explicit workflow transitions instead of informal notes.
+
+Why we do it this way:
+
+- human and agent work need the same visible state transitions
+- concurrency only works if issue ownership is explicit
+- PRs and CI are the natural governance layer for agent-written code
+
+### 4. Conservative orchestration beats clever orchestration
+
+The system intentionally leaves a lot of work ungrouped or pending instead of trying
+to maximize automation at all costs.
+
+How that materializes here:
+
+- existing-issue grouping in `lib/planner.sh` is intentionally conservative:
+  only simple 2-issue groups survive
+- if GPT critiques a Claude grouping as unsafe, agentify drops it rather than trying
+  to be clever and force it through
+- existing-issue epics execute one wave at a time, and one issue at a time within a
+  wave, even though cross-epic parallelism is allowed
+
+Why we do it this way:
+
+- false-positive grouping is worse than leaving work ungrouped
+- parallelism is valuable only when it does not create hidden merge or schema
+  collisions
+- the product should fail toward legibility and safety, not toward "maximum agentic"
+
+### 5. Live observability is part of the product
+
+The dashboard is not decoration. It is part of the control model.
+
+How that materializes here:
+
+- `lib/dashboard.py` serves live state, events, epics, triage data, and worker log
+  tails
+- `lib/index.html` renders the queue, active workers, grouped epics, latest events,
+  and live per-worker Codex logs
+- `.agentify/logs/*.log` captures actual worker output so you can inspect what a
+  running agent is doing, not just whether it is "active"
+
+Why we do it this way:
+
+- if an agent is writing code unattended, operators need more than a green dot
+- debugging agent systems requires replayable state and readable logs
+- trust comes from being able to inspect the machine while it is running
+
 ## Architecture
 
 ```
