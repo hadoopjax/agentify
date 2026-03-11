@@ -122,6 +122,13 @@ require_gh_auth() {
   fi
 }
 
+ensure_git_transport_auth() {
+  if ! gh auth setup-git > /dev/null 2>&1; then
+    echo "Git transport auth setup failed."
+    exit 1
+  fi
+}
+
 ensure_git_identity() {
   local name="${AGENT_GIT_NAME:-agentify}"
   local email="${AGENT_GIT_EMAIL:-agentify@local}"
@@ -229,6 +236,7 @@ cmd_run() {
   require_tools
   ensure_codex_auth
   require_gh_auth
+  ensure_git_transport_auth
   ensure_git_identity
 
   # Start dashboard

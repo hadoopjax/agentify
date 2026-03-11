@@ -231,13 +231,8 @@ render_prompt() {
 }
 
 # -- Worktree helpers --
-create_worktree() {
-  local branch="$1"
-  local wt_path="$WORKTREE_DIR/$branch"
+default_base_ref() {
   local base_ref=""
-  [ -d "$wt_path" ] && git worktree remove "$wt_path" --force 2>/dev/null
-  git branch -D "$branch" -q > /dev/null 2>&1 || true
-  git fetch origin -q > /dev/null 2>&1
 
   base_ref=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
   if [ -z "$base_ref" ]; then
@@ -250,6 +245,30 @@ create_worktree() {
     current_branch=$(git branch --show-current 2>/dev/null || true)
     [ -n "$current_branch" ] && base_ref="$current_branch"
   fi
+
+  echo "$base_ref"
+}
+
+create_worktree() {
+  local branch="$1"
+  local wt_path="$WORKTREE_DIR/$branch"
+  local base_ref=""
+
+  if [ -d "$wt_path" ] && git -C "$wt_path" rev-parse --verify HEAD > /dev/null 2>&1; then
+    echo "$wt_path"
+    return 0
+  fi
+
+  [ -d "$wt_path" ] && git worktree remove "$wt_path" --force 2>/dev/null
+  git fetch origin -q > /dev/null 2>&1
+
+  if git rev-parse --verify "$branch" > /dev/null 2>&1; then
+    git worktree add "$wt_path" "$branch" -q > /dev/null 2>&1 || return 1
+    echo "$wt_path"
+    return 0
+  fi
+
+  base_ref=$(default_base_ref)
   [ -n "$base_ref" ] || return 1
 
   git rev-parse --verify "$base_ref" > /dev/null 2>&1 || return 1
@@ -279,6 +298,27 @@ wait_for_ci() {
     emit "ci_waiting" "[#$num] CI running... (${waited}s)"
   done
   return 0
+}
+
+worktree_has_uncommitted_changes() {
+  local workdir="$1"
+  (
+    cd "$workdir" && (
+      ! git diff --quiet || ! git diff --cached --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]
+    )
+  ) > /dev/null 2>&1
+}
+
+worktree_unique_commit_count() {
+  local workdir="$1" base_ref
+  base_ref=$(default_base_ref)
+  [ -n "$base_ref" ] || {
+    echo 0
+    return 0
+  }
+  (
+    cd "$workdir" && git rev-list --count "${base_ref}..HEAD" 2>/dev/null
+  ) || echo 0
 }
 
 worktree_change_count() {
@@ -342,6 +382,11 @@ run_codex_with_watchdog() {
   done
 
   wait "$pid"
+}
+
+existing_pr_url_for_branch() {
+  local branch="$1"
+  gh pr list --head "$branch" --state open --limit 1 --json url -q '.[0].url // ""' 2>/dev/null || true
 }
 
 # ============================================================
@@ -435,8 +480,10 @@ work_issue() {
   fi
 
   # Check for changes
-  if (cd "$wt_path" && git diff --quiet && git diff --cached --quiet && \
-     [ -z "$(git ls-files --others --exclude-standard)" ]); then
+  local unique_commit_count
+  unique_commit_count=$(worktree_unique_commit_count "$wt_path")
+
+  if ! worktree_has_uncommitted_changes "$wt_path" && [ "${unique_commit_count:-0}" -eq 0 ]; then
     wlog "$num" "${C_YELLOW}No changes produced"
     write_worker_log "$worker_log" "Codex produced no file changes"
     emit "coding_done" "[#$num] No changes — needs more detail"
@@ -448,8 +495,29 @@ work_issue() {
   fi
 
   # Commit & push
-  (cd "$wt_path" && git add -A && git commit -q -m "fix: #$num $title")
-  (cd "$wt_path" && git push -u origin HEAD -q) 2>/dev/null
+  if worktree_has_uncommitted_changes "$wt_path"; then
+    if ! (cd "$wt_path" && git add -A && git commit -q -m "fix: #$num $title") >> "$worker_log" 2>&1; then
+      wlog "$num" "${C_RED}Commit failed"
+      write_worker_log "$worker_log" "Commit failed after coding pass"
+      emit "error" "[#$num] Commit failed"
+      increment_global "errors"
+      gh issue edit "$num" --remove-label "agent-wip" --add-label "agent" > /dev/null 2>&1 || true
+      remove_worker "$num"
+      return 1
+    fi
+  else
+    write_worker_log "$worker_log" "Reusing existing local commit(s) ahead of base"
+  fi
+
+  if ! (cd "$wt_path" && git push -u origin HEAD -q) >> "$worker_log" 2>&1; then
+    wlog "$num" "${C_RED}Push failed"
+    write_worker_log "$worker_log" "Push failed for $branch"
+    emit "error" "[#$num] Push failed"
+    increment_global "errors"
+    gh issue edit "$num" --remove-label "agent-wip" --add-label "agent" > /dev/null 2>&1 || true
+    remove_worker "$num"
+    return 1
+  fi
   wlog "$num" "${C_TEAL}Changes pushed"
   write_worker_log "$worker_log" "Changes committed and pushed on $branch"
   emit "coding_done" "[#$num] Changes pushed to $branch"
@@ -457,13 +525,26 @@ work_issue() {
   # ---- PR ----
   set_worker "$num" "phase" "pr"
   local pr_url
-  pr_url=$(gh pr create \
-    --title "fix: $title" \
-    --body "Closes #$num
+  pr_url=$(existing_pr_url_for_branch "$branch")
+  if [ -z "$pr_url" ]; then
+    if ! pr_url=$(gh pr create \
+      --title "fix: $title" \
+      --body "Closes #$num
 
 ---
 *agentify — Codex coded, Claude reviewed.*" \
-    --head "$branch" 2>/dev/null)
+      --head "$branch" 2>> "$worker_log"); then
+      wlog "$num" "${C_RED}PR creation failed"
+      write_worker_log "$worker_log" "PR creation failed for $branch"
+      emit "error" "[#$num] PR creation failed"
+      increment_global "errors"
+      gh issue edit "$num" --remove-label "agent-wip" --add-label "agent" > /dev/null 2>&1 || true
+      remove_worker "$num"
+      return 1
+    fi
+  else
+    write_worker_log "$worker_log" "Reusing existing PR $pr_url"
+  fi
 
   wlog "$num" "PR: $pr_url"
   write_worker_log "$worker_log" "Opened PR $pr_url"
