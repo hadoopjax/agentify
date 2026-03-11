@@ -436,51 +436,58 @@ work_issue() {
   wlog "$num" "${C_DIM}worktree: $wt_path"
   write_worker_log "$worker_log" "Worktree ready at $wt_path"
 
-  # ---- Code ----
-  wlog "$num" "${C_TEAL}Codex coding..."
-  emit "coding_start" "[#$num] Codex working on: $title"
-  write_worker_log "$worker_log" "Starting Codex coding pass"
-  write_worker_log "$worker_log" "Codex progress watchdog: ${CODEX_PROGRESS_TIMEOUT_SECONDS}s of inactivity"
-  if [ "${CODEX_ABSOLUTE_TIMEOUT_SECONDS:-0}" -gt 0 ]; then
-    write_worker_log "$worker_log" "Codex absolute ceiling: ${CODEX_ABSOLUTE_TIMEOUT_SECONDS}s"
-  fi
-
-  local code_prompt
-  code_prompt=$(render_prompt "code.md")
-
-  local codex_status=0
-  if run_codex_with_watchdog "$wt_path" "$code_prompt" "$worker_log"; then
-    codex_status=0
+  local unique_commit_count
+  unique_commit_count=$(worktree_unique_commit_count "$wt_path")
+  if ! worktree_has_uncommitted_changes "$wt_path" && [ "${unique_commit_count:-0}" -gt 0 ]; then
+    write_worker_log "$worker_log" "Detected existing local commit(s) ahead of base; resuming from preserved work"
+    emit "coding_resume" "[#$num] Resuming from preserved local commit(s)"
   else
-    codex_status=$?
-  fi
-  if [ "$codex_status" -ne 0 ]; then
-    wlog "$num" "${C_RED}Codex failed"
-    if [ "$codex_status" -eq 124 ]; then
-      wlog "$num" "${C_YELLOW}Codex hit absolute ceiling"
-      write_worker_log "$worker_log" "Codex coding pass hit absolute ceiling"
-      emit "timeout" "[#$num] Codex hit absolute ceiling"
-    elif [ "$codex_status" -eq 125 ]; then
-      wlog "$num" "${C_YELLOW}Codex stalled"
-      write_worker_log "$worker_log" "Codex coding pass stalled"
-      emit "stalled" "[#$num] Codex stalled with no progress for ${CODEX_PROGRESS_TIMEOUT_SECONDS}s"
+
+    # ---- Code ----
+    wlog "$num" "${C_TEAL}Codex coding..."
+    emit "coding_start" "[#$num] Codex working on: $title"
+    write_worker_log "$worker_log" "Starting Codex coding pass"
+    write_worker_log "$worker_log" "Codex progress watchdog: ${CODEX_PROGRESS_TIMEOUT_SECONDS}s of inactivity"
+    if [ "${CODEX_ABSOLUTE_TIMEOUT_SECONDS:-0}" -gt 0 ]; then
+      write_worker_log "$worker_log" "Codex absolute ceiling: ${CODEX_ABSOLUTE_TIMEOUT_SECONDS}s"
+    fi
+
+    local code_prompt
+    code_prompt=$(render_prompt "code.md")
+
+    local codex_status=0
+    if run_codex_with_watchdog "$wt_path" "$code_prompt" "$worker_log"; then
+      codex_status=0
     else
-      write_worker_log "$worker_log" "Codex coding pass failed"
+      codex_status=$?
     fi
-    if worker_log_has_quota_error "$worker_log"; then
-      wlog "$num" "${C_YELLOW}Pausing new work for quota exhaustion"
-      pause_dispatch_for_quota "$num" "$title" "$worker_log"
+    if [ "$codex_status" -ne 0 ]; then
+      wlog "$num" "${C_RED}Codex failed"
+      if [ "$codex_status" -eq 124 ]; then
+        wlog "$num" "${C_YELLOW}Codex hit absolute ceiling"
+        write_worker_log "$worker_log" "Codex coding pass hit absolute ceiling"
+        emit "timeout" "[#$num] Codex hit absolute ceiling"
+      elif [ "$codex_status" -eq 125 ]; then
+        wlog "$num" "${C_YELLOW}Codex stalled"
+        write_worker_log "$worker_log" "Codex coding pass stalled"
+        emit "stalled" "[#$num] Codex stalled with no progress for ${CODEX_PROGRESS_TIMEOUT_SECONDS}s"
+      else
+        write_worker_log "$worker_log" "Codex coding pass failed"
+      fi
+      if worker_log_has_quota_error "$worker_log"; then
+        wlog "$num" "${C_YELLOW}Pausing new work for quota exhaustion"
+        pause_dispatch_for_quota "$num" "$title" "$worker_log"
+      fi
+      emit "error" "[#$num] Codex failed"
+      increment_global "errors"
+      cleanup_worktree "$branch"
+      gh issue edit "$num" --remove-label "agent-wip" --add-label "agent" > /dev/null 2>&1 || true
+      remove_worker "$num"
+      return 1
     fi
-    emit "error" "[#$num] Codex failed"
-    increment_global "errors"
-    cleanup_worktree "$branch"
-    gh issue edit "$num" --remove-label "agent-wip" --add-label "agent" > /dev/null 2>&1 || true
-    remove_worker "$num"
-    return 1
   fi
 
   # Check for changes
-  local unique_commit_count
   unique_commit_count=$(worktree_unique_commit_count "$wt_path")
 
   if ! worktree_has_uncommitted_changes "$wt_path" && [ "${unique_commit_count:-0}" -eq 0 ]; then
