@@ -110,7 +110,7 @@ fi
 echo "Starting agentify on $(basename "$REPO")..."
 
 RUN_ARGS=(
-  run --rm -it
+  run --rm
   -v "$REPO":/repo
   --env-file "$ENV_FILE"
   -p "$PORT":"$PORT"
