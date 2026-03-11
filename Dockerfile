@@ -4,6 +4,7 @@ RUN apt-get update && apt-get install -y \
     git \
     jq \
     curl \
+    ripgrep \
     python3 \
     && rm -rf /var/lib/apt/lists/*
 
