@@ -1429,6 +1429,10 @@ main_loop() {
           echo "$!" > "$WORKERS_DIR/$num.pid"
         done
       elif [ "$active" -eq 0 ]; then
+        if [ -d "$AGENTIFY_DIR/epics" ]; then
+          source "$SCRIPT_DIR/planner.sh" 2>/dev/null
+          check_epic_completion
+        fi
         log "${C_DIM}No agent issues. Checking in ${POLL_INTERVAL}s..."
         emit "idle" "No issues, sleeping ${POLL_INTERVAL}s"
         sleep "$POLL_INTERVAL"
