@@ -2,7 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")")" && pwd)"
-LIB_DIR="$SCRIPT_DIR/../lib"
+AGENTIFY_ROOT="${AGENTIFY_INSTALL_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+LIB_DIR="$AGENTIFY_ROOT/lib"
 CONTROL_PLANE="$LIB_DIR/control_plane.py"
 AGENT_ENV_FILE="${AGENTIFY_ENV_FILE:-.agentify/agent.env}"
 
@@ -78,6 +79,7 @@ Usage: agentify <command> [options]
 
 Commands:
   run          Start the agent loop (from inside a git repo)
+  update       Update this agentify checkout to the remote default branch
   plan "desc"  Plan an epic (Claude + GPT-5.4 dialectic)
   group        Group existing issues into epic proposals
   manage N     Run the management agent for a stuck issue
@@ -253,6 +255,97 @@ cmd_dashboard() {
   cmd_run
 }
 
+default_branch_for_remote() {
+  local repo_root="$1"
+  local branch=""
+
+  branch="$(git -C "$repo_root" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')" || true
+  if [ -n "$branch" ]; then
+    printf '%s\n' "$branch"
+    return 0
+  fi
+
+  branch="$(git -C "$repo_root" ls-remote --symref origin HEAD 2>/dev/null | awk '/^ref:/ {sub("refs/heads/","",$2); print $2; exit}')" || true
+  if [ -n "$branch" ]; then
+    printf '%s\n' "$branch"
+    return 0
+  fi
+
+  return 1
+}
+
+checkout_branch_if_needed() {
+  local repo_root="$1"
+  local branch="$2"
+
+  if [ -n "$(git -C "$repo_root" branch --show-current)" ] && [ "$(git -C "$repo_root" branch --show-current)" = "$branch" ]; then
+    return 0
+  fi
+
+  if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch"; then
+    git -C "$repo_root" checkout "$branch"
+  else
+    git -C "$repo_root" checkout -B "$branch" --track "origin/$branch"
+  fi
+}
+
+cmd_update() {
+  if ! command -v git > /dev/null 2>&1; then
+    echo "Missing: git"
+    exit 1
+  fi
+
+  if ! git -C "$AGENTIFY_ROOT" rev-parse --git-dir > /dev/null 2>&1; then
+    echo "agentify update only works when agentify was installed from a git checkout."
+    echo "Install root: $AGENTIFY_ROOT"
+    exit 1
+  fi
+
+  if ! git -C "$AGENTIFY_ROOT" remote get-url origin > /dev/null 2>&1; then
+    echo "No origin remote is configured for the agentify checkout at:"
+    echo "  $AGENTIFY_ROOT"
+    exit 1
+  fi
+
+  if [ -n "$(git -C "$AGENTIFY_ROOT" status --porcelain)" ]; then
+    echo "Refusing to update because the agentify checkout has local changes:"
+    echo "  $AGENTIFY_ROOT"
+    echo "Commit, stash, or discard them first."
+    exit 1
+  fi
+
+  local default_branch current_branch old_rev new_rev
+  default_branch="$(default_branch_for_remote "$AGENTIFY_ROOT")" || {
+    echo "Couldn't determine the default branch for origin."
+    exit 1
+  }
+
+  current_branch="$(git -C "$AGENTIFY_ROOT" branch --show-current)"
+  old_rev="$(git -C "$AGENTIFY_ROOT" rev-parse --short HEAD)"
+
+  echo "Updating agentify in $AGENTIFY_ROOT"
+  echo "Fetching origin/$default_branch..."
+  git -C "$AGENTIFY_ROOT" fetch origin "$default_branch"
+
+  if [ "$current_branch" != "$default_branch" ]; then
+    if [ -n "$current_branch" ]; then
+      echo "Switching installed checkout from $current_branch to $default_branch"
+    else
+      echo "Switching installed checkout from detached HEAD to $default_branch"
+    fi
+    checkout_branch_if_needed "$AGENTIFY_ROOT" "$default_branch"
+  fi
+
+  git -C "$AGENTIFY_ROOT" pull --ff-only origin "$default_branch"
+  new_rev="$(git -C "$AGENTIFY_ROOT" rev-parse --short HEAD)"
+
+  if [ "$old_rev" = "$new_rev" ]; then
+    echo "agentify is already up to date at $new_rev"
+  else
+    echo "agentify updated: $old_rev -> $new_rev"
+  fi
+}
+
 cmd_run() {
   require_repo
   require_tools
@@ -301,7 +394,7 @@ CLAUDE_MODEL="claude-opus-4-6"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    run|init|test|dashboard|status|plan|group|manage|approve|triage) COMMAND="$1"; shift ;;
+    run|init|test|dashboard|status|update|plan|group|manage|approve|triage) COMMAND="$1"; shift ;;
     --max-runs)      shift; MAX_RUNS="$1"; shift ;;
     --poll)          shift; POLL_INTERVAL="$1"; shift ;;
     --port)          shift; DASHBOARD_PORT="$1"; shift ;;
@@ -440,6 +533,7 @@ esac
 
 case "$COMMAND" in
   run)       cmd_run ;;
+  update)    cmd_update ;;
   plan)      cmd_plan "$POSITIONAL" ;;
   group)     cmd_group ;;
   manage)    cmd_manage "$POSITIONAL" ;;

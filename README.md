@@ -193,6 +193,7 @@ Dashboard at `http://localhost:4242`. With Tailscale, accessible from any device
 ```
 agentify                  Start the loop + dashboard (default)
 agentify run              Same as above
+agentify update           Update this agentify checkout to the latest default-branch commit
 agentify plan "desc"      Plan an epic (Claude + GPT-5.4 dialectic)
 agentify group            Group existing issues into epic proposals
 agentify manage <issue>   Run the manager for a blocked worker
@@ -203,6 +204,8 @@ agentify init             Create agent/agent-wip/agent-skip labels
 agentify test             Create a test issue
 agentify status           Show state + recent activity
 ```
+
+`agentify update` updates the installed agentify checkout itself, not the repo you're running it against. It fast-forwards the checkout to the remote default branch and refuses to run if that checkout has uncommitted changes.
 
 ## Options
 
