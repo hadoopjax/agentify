@@ -31,6 +31,8 @@ CODEX_ABSOLUTE_TIMEOUT_SECONDS="${CODEX_ABSOLUTE_TIMEOUT_SECONDS:-0}"
 CODEX_MODEL="${CODEX_MODEL:-gpt-5.4}"
 CODEX_EFFORT="${CODEX_EFFORT:-high}"
 CLAUDE_MODEL="${CLAUDE_MODEL:-claude-opus-4-6}"
+AGENTIFY_SELF_REPO="${AGENTIFY_SELF_REPO:-}"
+AUTO_GROUP_COOLDOWN_SECONDS="${AUTO_GROUP_COOLDOWN_SECONDS:-600}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROMPTS_DIR="$SCRIPT_DIR/../prompts"
@@ -232,6 +234,40 @@ EOF
   fi
 }
 
+# -- Self-healing: report agentify internal errors to the agentify repo --
+report_self_error() {
+  local signature="$1" title="$2" detail="$3"
+  local agentify_repo="${AGENTIFY_SELF_REPO:-}"
+  [ -n "$agentify_repo" ] || return 0
+
+  # Deduplicate: check if an open issue with this signature exists
+  local existing
+  existing=$(gh issue list --repo "$agentify_repo" --state open \
+    --search "\"agentify-self-heal:${signature}\" in:body" --limit 1 \
+    --json number -q '.[0].number // ""' 2>/dev/null || true)
+  [ -z "$existing" ] || return 0
+
+  local body
+  body="Agentify detected an internal error that may need a fix.
+
+**Signature:** \`$signature\`
+**Detail:**
+\`\`\`
+$detail
+\`\`\`
+
+**Target repo:** $(jq -r '.repo // "unknown"' "$STATE_FILE" 2>/dev/null)
+**Timestamp:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+<!-- agentify-self-heal:$signature -->"
+
+  gh issue create --repo "$agentify_repo" \
+    --title "[self-heal] $title" \
+    --body "$body" \
+    --label "agent" > /dev/null 2>&1 && \
+    emit "self_heal" "Created self-healing issue in agentify repo: $title" || true
+}
+
 # -- Per-worker state (no lock needed, one writer per file) --
 worker_state_file() {
   local num="$1"
@@ -323,6 +359,12 @@ is_issue_claimed() {
 
 # -- Repo context & prompt rendering --
 repo_context() {
+  if [ -f "product_brief.md" ]; then
+    echo "## Product Brief"
+    echo ""
+    cat "product_brief.md"
+    echo ""
+  fi
   if [ -f ".agentify/agents.md" ]; then
     echo "## Repo-Specific Context"
     echo ""
@@ -399,6 +441,7 @@ create_worktree() {
   fi
 
   [ -d "$wt_path" ] && git worktree remove "$wt_path" --force 2>/dev/null
+  git worktree prune 2>/dev/null || true
   git fetch origin -q > /dev/null 2>&1
 
   if git rev-parse --verify "$branch" > /dev/null 2>&1; then
@@ -556,6 +599,38 @@ mark_worker_resumable_failure() {
   write_worker_log "$worker_log" "$message"
   emit "error" "[#$num] $message"
   increment_global "errors"
+
+  # Track per-worker retry count + timestamp for backoff
+  local wfile
+  wfile=$(worker_state_file "$num")
+  if [ -f "$wfile" ]; then
+    local retries
+    retries=$(jq -r '.retries // 0' "$wfile" 2>/dev/null || echo 0)
+    retries=$((retries + 1))
+    local now
+    now=$(date +%s)
+    local tmp=$(mktemp)
+    jq --argjson r "$retries" --argjson t "$now" '.retries = $r | .failed_at = $t' "$wfile" > "$tmp" && mv "$tmp" "$wfile"
+    if [ "$retries" -ge 2 ]; then
+      write_worker_log "$worker_log" "Blocked after $retries consecutive failures — auto-triaging"
+      emit "blocked" "[#$num] Blocked after $retries retries: $message — triggering auto-triage"
+      set_worker "$num" "phase" "merge_blocked"
+      set_worker "$num" "last_error" "Blocked after $retries retries: $message"
+      # Auto-triage: immediately spawn manager to diagnose and fix
+      manage_issue "$num" &
+      echo "$!" > "$WORKERS_DIR/$num.pid"
+    fi
+  fi
+
+  # Self-heal: report persistent failures to the agentify repo
+  local total_errors
+  total_errors=$(jq -r '.errors // "0"' "$STATE_FILE" 2>/dev/null || echo "0")
+  if [ "$total_errors" -ge 10 ] && [ $(( total_errors % 25 )) -eq 0 ]; then
+    report_self_error "high-error-rate-${total_errors}" \
+      "High error rate: $total_errors errors in current run" \
+      "Phase: $phase\nIssue: #$num\nLatest: $message\nTotal errors: $total_errors"
+  fi
+
   return 1
 }
 
@@ -1256,6 +1331,8 @@ init_run() {
   [ -f "$EVENTS_FILE" ] || touch "$EVENTS_FILE"
   # Clean stale worker state from previous runs
   rm -f "$WORKERS_DIR"/*.pid 2>/dev/null
+  # Prune stale worktrees from previous runs
+  git worktree prune 2>/dev/null || true
 }
 
 recover_orphaned_wip_issues() {
@@ -1278,8 +1355,21 @@ recover_orphaned_wip_issues() {
       continue
     fi
 
-    if [ -f "$(worker_state_file "$num")" ]; then
-      continue
+    local wfile
+    wfile=$(worker_state_file "$num")
+    if [ -f "$wfile" ]; then
+      # Worker state exists — check if the process is actually alive
+      local pidfile="${wfile%.json}.pid"
+      if [ -f "$pidfile" ]; then
+        local wpid
+        wpid=$(cat "$pidfile" 2>/dev/null || echo "0")
+        if kill -0 "$wpid" 2>/dev/null; then
+          continue  # Process alive, skip
+        fi
+        # Dead process — clean up stale files
+        rm -f "$pidfile"
+      fi
+      rm -f "$wfile"
     fi
 
     gh issue edit "$num" --remove-label "agent-wip" --add-label "agent" 2>/dev/null || continue
@@ -1305,6 +1395,20 @@ resume_orphaned_workers() {
         continue
         ;;
     esac
+
+    # Exponential backoff: don't resume if failed recently
+    # retry 1 = wait 120s, retry 2+ = escalates to manager anyway
+    local failed_at retries
+    failed_at=$(jq -r '.failed_at // 0' "$wfile" 2>/dev/null || echo 0)
+    retries=$(jq -r '.retries // 0' "$wfile" 2>/dev/null || echo 0)
+    if [ "$failed_at" -gt 0 ] && [ "$retries" -gt 0 ]; then
+      local now backoff_seconds
+      now=$(date +%s)
+      backoff_seconds=$((120 * retries))
+      if [ $((now - failed_at)) -lt "$backoff_seconds" ]; then
+        continue
+      fi
+    fi
 
     log "${C_YELLOW}Resuming worker for #$num: ${title:-issue $num} (${phase})"
     resume_worker "$num" &
@@ -1357,6 +1461,12 @@ main_loop() {
   if [ -f ".agentify/agents.md" ]; then
     printf "  ${C_DIM}├─${C_RESET} repo agents.md: ${C_GREEN}loaded${C_RESET}\n"
   fi
+  if [ -f "product_brief.md" ]; then
+    printf "  ${C_DIM}├─${C_RESET} product brief: ${C_GREEN}loaded${C_RESET}\n"
+  fi
+  if [ -n "${AGENTIFY_SELF_REPO:-}" ]; then
+    printf "  ${C_DIM}├─${C_RESET} self-heal repo: ${C_BOLD}$AGENTIFY_SELF_REPO${C_RESET}\n"
+  fi
   printf "  ${C_DIM}│${C_RESET}\n"
 
   emit "loop_start" "Agent loop started for $repo (concurrency: $MAX_CONCURRENT)"
@@ -1390,6 +1500,12 @@ main_loop() {
     fi
     recover_orphaned_wip_issues "runtime"
 
+    # Advance epics every cycle (detect completed issues, start next waves)
+    if [ -d "$AGENTIFY_DIR/epics" ]; then
+      source "$SCRIPT_DIR/planner.sh" 2>/dev/null
+      check_epic_completion 2>/dev/null || true
+    fi
+
     resume_pause_if_expired || true
 
     local pause_remaining
@@ -1411,7 +1527,14 @@ main_loop() {
     if [ "$slots" -gt 0 ]; then
       # Pick issues (only those labeled 'agent', not 'agent-wip')
       local issues_json
-      issues_json=$(gh issue list --label agent --state open --limit "$slots" --json number,title,body 2>/dev/null)
+      issues_json=$(gh issue list --label agent --state open --limit 25 --json number,title,body 2>/dev/null)
+
+      # LLM-driven sequencing: order by priority, then take what we need
+      source "$SCRIPT_DIR/planner.sh" 2>/dev/null
+      issues_json=$(sequence_issues "$issues_json" 2>/dev/null || echo "$issues_json")
+
+      # Take only what we have slots for
+      issues_json=$(echo "$issues_json" | jq -c ".[0:$slots]" 2>/dev/null || echo "$issues_json")
       local count=$(echo "$issues_json" | jq 'length' 2>/dev/null || echo 0)
 
       if [ "$count" -gt 0 ]; then
@@ -1433,6 +1556,41 @@ main_loop() {
           source "$SCRIPT_DIR/planner.sh" 2>/dev/null
           check_epic_completion
         fi
+
+        # Auto-group: when idle, check for ungrouped issues and propose epics
+        if [ -z "${_last_auto_group_epoch:-}" ]; then
+          _last_auto_group_epoch=0
+        fi
+        local _now_epoch
+        _now_epoch=$(date +%s)
+        local _auto_group_cooldown=${AUTO_GROUP_COOLDOWN_SECONDS:-600}
+        if [ $((_now_epoch - _last_auto_group_epoch)) -ge "$_auto_group_cooldown" ]; then
+          source "$SCRIPT_DIR/planner.sh" 2>/dev/null
+          local _candidates
+          _candidates=$(existing_group_candidates 2>/dev/null || echo "[]")
+          local _candidate_count
+          _candidate_count=$(echo "$_candidates" | jq 'length' 2>/dev/null || echo 0)
+          if [ "$_candidate_count" -ge 2 ]; then
+            log "${C_TEAL}Auto-grouping $_candidate_count ungrouped issues..."
+            group_existing_issues 2>/dev/null || true
+          fi
+          _last_auto_group_epoch=$_now_epoch
+        fi
+
+        # Auto-ideate: when idle, propose features if no pending proposals exist
+        if [ -z "${_last_ideation_epoch:-}" ]; then
+          _last_ideation_epoch=0
+        fi
+        local _ideation_cooldown=${AUTO_IDEATION_COOLDOWN_SECONDS:-1800}
+        if [ $((_now_epoch - _last_ideation_epoch)) -ge "$_ideation_cooldown" ]; then
+          source "$SCRIPT_DIR/planner.sh" 2>/dev/null
+          if [ -f "product_brief.md" ]; then
+            log "${C_TEAL}Checking for feature proposals..."
+            check_and_propose_features 2>/dev/null || true
+          fi
+          _last_ideation_epoch=$_now_epoch
+        fi
+
         log "${C_DIM}No agent issues. Checking in ${POLL_INTERVAL}s..."
         emit "idle" "No issues, sleeping ${POLL_INTERVAL}s"
         sleep "$POLL_INTERVAL"

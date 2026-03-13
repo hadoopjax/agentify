@@ -125,19 +125,44 @@ normalize_existing_group_plan() {
   local claude_groups_json="$2"
   local gpt_critique_json="$3"
 
-  python3 - "$issues_json" "$claude_groups_json" "$gpt_critique_json" <<'PY'
+python3 - "$issues_json" "$claude_groups_json" "$gpt_critique_json" <<'PY'
 import json
+import re
 import sys
 
-issues = json.loads(sys.argv[1] or "[]")
-claude = json.loads(sys.argv[2] or "{}")
-gpt = json.loads(sys.argv[3] or "{}")
+def safe_json(payload, fallback):
+    if not payload:
+        return fallback
+    try:
+        return json.loads(payload)
+    except Exception:
+        return fallback
+
+
+issues = safe_json(sys.argv[1], [])
+claude = safe_json(sys.argv[2], {})
+gpt = safe_json(sys.argv[3], {})
 
 valid = {issue["number"] for issue in issues}
 issue_meta = {issue["number"]: issue for issue in issues}
 claimed = set()
 proposals = []
 dropped_groups = []
+
+
+def parse_issue_number(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw.startswith("#"):
+            raw = raw[1:].strip()
+        match = re.search(r"^\d+$", raw)
+        if match:
+            return int(match.group())
+    return None
 
 def as_priority(value):
     value = (value or "medium").lower()
@@ -149,15 +174,18 @@ def normalize_waves(issue_numbers, raw_waves):
     waves = []
 
     if isinstance(raw_waves, list):
-      for wave in raw_waves:
-        if not isinstance(wave, list):
-          continue
-        for value in wave:
-          if isinstance(value, int) and value in allowed and value not in seen:
-            # Existing-issue epics run one issue at a time within an epic.
-            # This keeps cross-epic parallelism while avoiding same-subsystem conflicts.
-            waves.append([value])
-            seen.add(value)
+        for wave in raw_waves:
+          if not isinstance(wave, list):
+            continue
+          for value in wave:
+            issue_number = parse_issue_number(value)
+            if issue_number is None:
+              continue
+            if issue_number in allowed and issue_number not in seen:
+              # Existing-issue epics run one issue at a time within an epic.
+              # This keeps cross-epic parallelism while avoiding same-subsystem conflicts.
+              waves.append([issue_number])
+              seen.add(issue_number)
 
     for num in issue_numbers:
       if num not in seen:
@@ -191,9 +219,12 @@ def append_groups(groups, source):
             issue_numbers = []
             if isinstance(raw_numbers, list):
                 for value in raw_numbers:
-                    labels = issue_meta.get(value, {}).get("labels", [])
-                    if isinstance(value, int) and value in valid and "epic" not in labels and value not in issue_numbers:
-                        issue_numbers.append(value)
+                    issue_number = parse_issue_number(value)
+                    if issue_number is None:
+                        continue
+                    labels = issue_meta.get(issue_number, {}).get("labels", [])
+                    if issue_number in valid and "epic" not in labels and issue_number not in issue_numbers:
+                        issue_numbers.append(issue_number)
 
             dropped_groups.append({
                 "title": (group.get("title") or "").strip() or f"Dropped group {group_index}",
@@ -209,9 +240,12 @@ def append_groups(groups, source):
 
         issue_numbers = []
         for value in raw_numbers:
-            labels = issue_meta.get(value, {}).get("labels", [])
-            if isinstance(value, int) and value in valid and "epic" not in labels and value not in claimed and value not in issue_numbers:
-                issue_numbers.append(value)
+            issue_number = parse_issue_number(value)
+            if issue_number is None:
+                continue
+            labels = issue_meta.get(issue_number, {}).get("labels", [])
+            if issue_number in valid and "epic" not in labels and issue_number not in claimed and issue_number not in issue_numbers:
+                issue_numbers.append(issue_number)
 
         if len(issue_numbers) != 2:
             continue
@@ -237,7 +271,12 @@ ungrouped = sorted(valid - claimed)
 requested = []
 for payload in (claude.get("ungrouped_issue_numbers"), gpt.get("ungrouped_issue_numbers")):
     if isinstance(payload, list):
-        requested.extend(v for v in payload if isinstance(v, int) and v in valid and v not in claimed)
+        for value in payload:
+            issue_number = parse_issue_number(value)
+            if issue_number is None:
+                continue
+            if issue_number in valid and issue_number not in claimed:
+                requested.append(issue_number)
 
 for num in requested:
     if num not in ungrouped:
@@ -601,6 +640,9 @@ advance_existing_issue_epics() {
   for epic_file in "$EPICS_DIR"/*.json; do
     [ -f "$epic_file" ] || continue
 
+    # Skip corrupt/empty epic files
+    jq empty "$epic_file" 2>/dev/null || continue
+
     local epic_kind
     epic_kind=$(jq -r '.kind // ""' "$epic_file")
     [ "$epic_kind" = "existing-issues" ] || continue
@@ -617,6 +659,23 @@ advance_existing_issue_epics() {
       local started total_waves
       started=$(jq -r ".proposals[$i].started_waves // 0" "$epic_file")
       total_waves=$(jq -r ".proposals[$i].waves | length" "$epic_file")
+
+      # Fix: if approved but started_waves is 0, kick off the first wave
+      if [ "$started" -eq 0 ] && [ "$total_waves" -gt 0 ]; then
+        local first_wave_numbers
+        first_wave_numbers=$(jq -r ".proposals[$i].waves[0][]?" "$epic_file")
+        for num in $first_wave_numbers; do
+          gh issue edit "$num" --add-label "agent" > /dev/null 2>&1
+        done
+        local tmp=$(mktemp)
+        jq --argjson i "$i" '.proposals[$i].started_waves = 1' "$epic_file" > "$tmp" && mv "$tmp" "$epic_file"
+        started=1
+        changed=1
+        local title
+        title=$(jq -r ".proposals[$i].title" "$epic_file")
+        emit "group_wave_started" "Recovered stalled proposal — started first wave: $title"
+      fi
+
       [ "$started" -gt 0 ] || continue
 
       local current_wave_done=true
@@ -731,4 +790,142 @@ check_epic_completion() {
   done
 
   return 0
+}
+
+propose_features() {
+  [ -f "product_brief.md" ] || return 0
+
+  local ideate_template="$PROMPTS_DIR/ideate.md"
+  [ -f "$ideate_template" ] || return 0
+
+  local codebase_summary
+  codebase_summary=$(
+    {
+      echo "."
+      find . -mindepth 1 -maxdepth 1 \
+        \( -name ".git" -o -name ".agentify" -o -name "node_modules" \) -prune -o -print \
+        | sort \
+        | while read -r path; do
+            local name
+            name="${path#./}"
+
+            if [ -d "$path" ]; then
+              echo "|- $name/"
+              find "$path" -mindepth 1 -maxdepth 1 -type f ! -name ".DS_Store" \
+                | sort | head -n 5 \
+                | while read -r file; do
+                    echo "|  |- ${file#$path/}"
+                  done
+            else
+              echo "|- $name"
+            fi
+          done
+    } | head -n 50
+  )
+
+  local ideate_prompt
+  ideate_prompt=$(cat "$ideate_template")
+  ideate_prompt="${ideate_prompt//\{\{REPO_CONTEXT\}\}/$(repo_context)}"
+  ideate_prompt="${ideate_prompt//\{\{CODEBASE_SUMMARY\}\}/$codebase_summary}"
+
+  local claude_response
+  claude_response=$(claude -p --model "$CLAUDE_MODEL" "$ideate_prompt")
+
+  local ideation_json
+  ideation_json=$(echo "$claude_response" | extract_json || true)
+  [ -n "$ideation_json" ] || ideation_json='{"features":[],"notes":""}'
+
+  local features
+  features=$(echo "$ideation_json" | jq -c 'if (.features | type) == "array" then .features else [] end' 2>/dev/null || echo "[]")
+
+  local feature_count
+  feature_count=$(echo "$features" | jq 'length' 2>/dev/null || echo 0)
+
+  local proposals_dir="$AGENTIFY_DIR/proposals"
+  mkdir -p "$proposals_dir"
+
+  local proposal_id
+  proposal_id=$(date +%s)
+  local proposal_file="$proposals_dir/$proposal_id.json"
+
+  jq -nc \
+    --argjson id "$proposal_id" \
+    --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg status "pending" \
+    --argjson features "$features" \
+    '{
+      id: $id,
+      created_at: $created,
+      status: $status,
+      features: $features
+    }' > "$proposal_file"
+
+  emit "ideation_done" "Proposed $feature_count new features"
+
+  printf "\n  ${C_BOLD}Feature proposals${C_RESET}\n"
+  printf "  ${C_DIM}ID: $proposal_id${C_RESET}\n\n"
+  if [ "$feature_count" -gt 0 ]; then
+    echo "$features" | jq -r '.[] | "  [\(.priority // "medium")] \(.title // "Untitled feature")"'
+  else
+    printf "  ${C_DIM}No features proposed${C_RESET}\n"
+  fi
+  printf "\n  ${C_DIM}Saved: $proposal_file${C_RESET}\n\n"
+}
+
+check_and_propose_features() {
+  [ -f "product_brief.md" ] || return 0
+
+  local proposals_dir="$AGENTIFY_DIR/proposals"
+  if [ -d "$proposals_dir" ]; then
+    for proposal_file in "$proposals_dir"/*.json; do
+      [ -f "$proposal_file" ] || continue
+      local status
+      status=$(jq -r '.status // ""' "$proposal_file" 2>/dev/null || echo "")
+      if [ "$status" = "pending" ]; then
+        return 0
+      fi
+    done
+  fi
+
+  propose_features
+}
+
+sequence_issues() {
+  local issues_json="$1"
+  local count
+  count=$(echo "$issues_json" | jq 'length' 2>/dev/null || echo 0)
+
+  # Skip if 3 or fewer issues — not worth an LLM call
+  if [ "$count" -le 3 ]; then
+    echo "$issues_json"
+    return 0
+  fi
+
+  local template
+  template=$(cat "$PROMPTS_DIR/sequence.md")
+  template="${template//\{\{REPO_CONTEXT\}\}/$(repo_context)}"
+  template="${template//\{\{ISSUES_JSON\}\}/$issues_json}"
+
+  local response
+  response=$(claude -p --model "$CLAUDE_MODEL" "$template" 2>/dev/null || true)
+
+  local ordered_json
+  ordered_json=$(echo "$response" | extract_json || true)
+  [ -n "$ordered_json" ] || { echo "$issues_json"; return 0; }
+
+  # Reorder issues_json according to ordered_numbers
+  python3 -c "
+import json, sys
+issues = json.loads(sys.argv[1])
+order_data = json.loads(sys.argv[2])
+ordered_nums = order_data.get('ordered_numbers', [])
+by_num = {i['number']: i for i in issues}
+result = []
+for n in ordered_nums:
+    if n in by_num:
+        result.append(by_num.pop(n))
+# Append any issues not mentioned
+result.extend(by_num.values())
+print(json.dumps(result))
+" "$issues_json" "$ordered_json"
 }

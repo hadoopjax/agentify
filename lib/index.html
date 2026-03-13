@@ -4,1466 +4,1242 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>agentify</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
   :root {
-    --bg: #FAF6F1;
-    --surface: #FFFFFF;
-    --surface-hover: #FEFCFA;
-    --coral: #F2706D;
-    --coral-soft: #FFF0EF;
-    --teal: #2BB5A6;
-    --teal-soft: #E8F8F5;
-    --seafoam: #CBF3F0;
-    --sand: #F0B456;
-    --sand-soft: #FFF8EC;
-    --violet: #7C6AEF;
-    --violet-soft: #F0EDFF;
-    --mint: #E8F5E9;
-    --text: #1A2B2B;
-    --text-secondary: #637272;
-    --text-tertiary: #9DAEAE;
-    --border: #EDE8E1;
-    --border-light: #F5F0EA;
-    --radius: 14px;
+    --bg: #07090C;
+    --surface: rgba(255,255,255,0.025);
+    --surface-solid: #0E1117;
+    --surface-raised: rgba(255,255,255,0.045);
+    --surface-hover: rgba(255,255,255,0.06);
+    --border: rgba(255,255,255,0.05);
+    --border-bright: rgba(255,255,255,0.1);
+
+    --text: #D6DDE8;
+    --text-hi: #F0F4F8;
+    --text-mid: #7E8B9E;
+    --text-lo: #3E4A5C;
+
+    /* Signature gradient — warm coral through electric violet */
+    --glow-1: #FF6B4A;
+    --glow-2: #D946A8;
+    --glow-3: #8B5CF6;
+    --gradient: linear-gradient(135deg, var(--glow-1), var(--glow-2), var(--glow-3));
+    --gradient-text: linear-gradient(135deg, #FF8A6B, #E060B8, #A78BFA);
+
+    --mint: #34D399;
+    --mint-dim: rgba(52,211,153,0.1);
+    --mint-glow: rgba(52,211,153,0.15);
+
+    --amber: #FBBF24;
+    --amber-dim: rgba(251,191,36,0.08);
+
+    --rose: #FB7185;
+    --rose-dim: rgba(251,113,133,0.08);
+
+    --blue: #60A5FA;
+    --blue-dim: rgba(96,165,250,0.08);
+
+    --font: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+    --mono: 'IBM Plex Mono', 'SF Mono', monospace;
+    --radius: 16px;
     --radius-sm: 10px;
-    --shadow: 0 1px 2px rgba(0,0,0,0.03), 0 4px 16px rgba(0,0,0,0.04);
-    --shadow-lg: 0 2px 4px rgba(0,0,0,0.04), 0 8px 32px rgba(0,0,0,0.06);
+    --radius-xs: 6px;
   }
 
   body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    font-family: var(--font);
     background: var(--bg);
     color: var(--text);
     min-height: 100vh;
     -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+    position: relative;
   }
 
-  .shell {
-    max-width: 680px;
-    margin: 0 auto;
-    padding: 40px 24px 60px;
+  /* ── Atmospheric background ── */
+  body::before {
+    content: '';
+    position: fixed;
+    top: -40%;
+    left: -20%;
+    width: 80%;
+    height: 80%;
+    background: radial-gradient(ellipse, rgba(139,92,246,0.06) 0%, transparent 70%);
+    pointer-events: none;
+    z-index: 0;
+  }
+  body::after {
+    content: '';
+    position: fixed;
+    bottom: -30%;
+    right: -10%;
+    width: 60%;
+    height: 60%;
+    background: radial-gradient(ellipse, rgba(255,107,74,0.04) 0%, transparent 70%);
+    pointer-events: none;
+    z-index: 0;
   }
 
-  /* Header */
-  header {
+  /* Grain overlay */
+  .grain {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 1;
+    opacity: 0.3;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+  }
+
+  /* ── Staggered page load ── */
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .reveal {
+    opacity: 0;
+    animation: rise 0.6s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  }
+  .reveal-1 { animation-delay: 0.05s; }
+  .reveal-2 { animation-delay: 0.12s; }
+  .reveal-3 { animation-delay: 0.2s; }
+  .reveal-4 { animation-delay: 0.28s; }
+  .reveal-5 { animation-delay: 0.36s; }
+
+  /* ── Layout ── */
+  .app {
+    position: relative;
+    z-index: 2;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── Topbar ── */
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 36px;
+    padding: 0 36px;
+    height: 60px;
+    background: rgba(7,9,12,0.7);
+    backdrop-filter: blur(24px) saturate(1.6);
+    -webkit-backdrop-filter: blur(24px) saturate(1.6);
+    border-bottom: 1px solid var(--border);
   }
 
-  .logo-group { display: flex; align-items: baseline; gap: 10px; }
+  .topbar-left {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
 
   .logo {
-    font-size: 20px;
-    font-weight: 700;
-    letter-spacing: -0.3px;
-    color: var(--text);
+    font-size: 17px;
+    font-weight: 800;
+    letter-spacing: -0.5px;
+    background: var(--gradient-text);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
   }
 
-  .repo-name {
-    font-size: 12px;
-    color: var(--text-tertiary);
-    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
-    font-weight: 500;
-  }
-
-  .header-status { display: flex; align-items: center; gap: 8px; }
-
-  .pill {
+  .repo-badge {
+    font-family: var(--mono);
     font-size: 11px;
-    font-weight: 600;
+    font-weight: 500;
+    color: var(--text-lo);
+    background: var(--surface);
     padding: 4px 12px;
-    border-radius: 20px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
     letter-spacing: 0.3px;
   }
-  .pill-idle { background: var(--sand-soft); color: #B8860B; }
-  .pill-active { background: var(--teal-soft); color: #1A8A7D; }
-  .pill-paused { background: var(--coral-soft); color: #C35B58; }
 
-  .beacon {
-    width: 8px; height: 8px; border-radius: 50%;
-    background: var(--text-tertiary);
-    transition: background 0.3s;
-  }
-  .beacon.on {
-    background: var(--teal);
-    box-shadow: 0 0 0 3px rgba(43,181,166,0.2);
-    animation: breathe 2.5s ease-in-out infinite;
-  }
-  .beacon.paused {
-    background: var(--coral);
-    box-shadow: 0 0 0 3px rgba(242,112,109,0.18);
-    animation: breathePaused 2.5s ease-in-out infinite;
-  }
-  @keyframes breathe { 0%,100%{ box-shadow: 0 0 0 3px rgba(43,181,166,0.2) } 50%{ box-shadow: 0 0 0 6px rgba(43,181,166,0.08) } }
-  @keyframes breathePaused { 0%,100%{ box-shadow: 0 0 0 3px rgba(242,112,109,0.18) } 50%{ box-shadow: 0 0 0 6px rgba(242,112,109,0.08) } }
-
-  /* Sections */
-  .section { margin-bottom: 32px; }
-  .section-head {
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    color: var(--text-tertiary);
-    margin-bottom: 12px;
-    padding-left: 2px;
-  }
-
-  .run-card {
-    padding: 18px 20px;
-  }
-
-  .run-grid {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 12px;
-  }
-
-  .run-block {
-    border: 1px solid var(--border-light);
-    border-radius: var(--radius-sm);
-    background: var(--surface-hover);
-    padding: 14px;
-    min-height: 108px;
-  }
-
-  .run-label {
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.9px;
-    text-transform: uppercase;
-    color: var(--text-tertiary);
-    margin-bottom: 8px;
-  }
-
-  .run-count {
-    font-size: 24px;
-    font-weight: 700;
-    line-height: 1;
-    color: var(--text);
-    margin-bottom: 8px;
-  }
-
-  .run-list {
+  .topbar-right {
     display: flex;
-    flex-direction: column;
-    gap: 6px;
+    align-items: center;
+    gap: 14px;
   }
 
-  .run-item {
-    font-size: 12px;
-    color: var(--text-secondary);
-    line-height: 1.4;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .run-item strong {
-    color: var(--text);
-    font-family: 'SF Mono', 'Fira Code', monospace;
-    font-size: 11px;
-    margin-right: 6px;
-  }
-
-  .run-item-btn {
-    border: none;
-    background: transparent;
-    text-align: left;
-    padding: 0;
-    cursor: pointer;
-    color: inherit;
-    font: inherit;
-  }
-
-  .run-item-btn:hover {
-    color: var(--teal);
-  }
-
-  .run-empty {
-    font-size: 12px;
-    color: var(--text-tertiary);
-    line-height: 1.4;
-  }
-
-  .run-latest {
-    font-size: 13px;
-    line-height: 1.5;
-    color: var(--text-secondary);
-  }
-
-  .run-latest strong {
-    color: var(--text);
-  }
-
-  .run-note {
-    margin-top: 12px;
-    border: 1px solid #F7D9D7;
-    border-radius: var(--radius-sm);
-    background: var(--coral-soft);
-    color: #944542;
-    padding: 12px 14px;
-    font-size: 12px;
-    line-height: 1.55;
-    display: none;
-  }
-
-  .run-note strong {
-    color: #7F3532;
-  }
-
-  /* Plan bar */
-  .plan-bar {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow);
-    padding: 6px 6px 6px 20px;
+  .status-chip {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.8px;
+    padding: 5px 14px;
+    border-radius: 999px;
+    text-transform: uppercase;
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-bottom: 36px;
-    transition: border-color 0.2s, box-shadow 0.2s;
   }
-  .plan-actions {
-    display: flex;
-    gap: 8px;
+  .status-idle { color: var(--text-lo); background: var(--surface); border: 1px solid var(--border); }
+  .status-active {
+    color: var(--mint);
+    background: var(--mint-dim);
+    border: 1px solid rgba(52,211,153,0.2);
   }
-  .plan-bar:focus-within {
-    border-color: var(--teal);
-    box-shadow: 0 0 0 3px rgba(43,181,166,0.1), var(--shadow);
+  .status-paused {
+    color: var(--amber);
+    background: var(--amber-dim);
+    border: 1px solid rgba(251,191,36,0.2);
   }
 
-  .plan-bar input {
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+  .status-active .status-dot {
+    animation: breathe 2s ease-in-out infinite;
+    box-shadow: 0 0 8px rgba(52,211,153,0.5);
+  }
+  @keyframes breathe {
+    0%, 100% { opacity: 1; box-shadow: 0 0 8px rgba(52,211,153,0.5); }
+    50% { opacity: 0.4; box-shadow: 0 0 4px rgba(52,211,153,0.2); }
+  }
+  .status-paused .status-dot {
+    animation: breathe-amber 2s ease-in-out infinite;
+  }
+  @keyframes breathe-amber {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  /* ── Feature bar ── */
+  .feature-bar {
+    padding: 24px 36px 20px;
+  }
+
+  .feature-input-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--surface-solid);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 5px 5px 5px 22px;
+    max-width: 860px;
+    transition: border-color 0.3s, box-shadow 0.3s;
+  }
+  .feature-input-wrap::before {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    border-radius: 15px;
+    background: var(--gradient);
+    opacity: 0;
+    z-index: -1;
+    transition: opacity 0.3s;
+    filter: blur(1px);
+  }
+  .feature-input-wrap:focus-within {
+    border-color: transparent;
+  }
+  .feature-input-wrap:focus-within::before {
+    opacity: 0.4;
+  }
+
+  .feature-input-wrap input {
     flex: 1;
+    background: transparent;
     border: none;
     outline: none;
+    font-family: var(--font);
     font-size: 14px;
-    font-family: inherit;
-    color: var(--text);
-    background: transparent;
+    font-weight: 400;
+    color: var(--text-hi);
     line-height: 1.5;
   }
-  .plan-bar input::placeholder { color: var(--text-tertiary); }
+  .feature-input-wrap input::placeholder { color: var(--text-lo); }
 
   .btn {
-    border: none;
-    cursor: pointer;
-    font-weight: 600;
-    font-size: 13px;
-    padding: 10px 20px;
-    border-radius: var(--radius-sm);
-    font-family: inherit;
-    transition: all 0.15s ease;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     gap: 6px;
-    min-width: 0;
+    font-family: var(--font);
+    font-weight: 600;
+    font-size: 13px;
+    border: none;
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    padding: 10px 20px;
+    transition: all 0.2s cubic-bezier(0.22, 1, 0.36, 1);
     line-height: 1;
+    white-space: nowrap;
+    position: relative;
+    overflow: hidden;
   }
-  .btn:active { transform: scale(0.97); }
-  .btn:disabled { opacity: 0.5; cursor: default; transform: none; }
+  .btn:active { transform: scale(0.96); }
+  .btn:disabled { opacity: 0.35; cursor: default; transform: none; }
 
-  .btn-primary { background: var(--teal); color: white; }
-  .btn-primary:hover:not(:disabled) { background: #26A697; }
-
-  .btn-danger { background: var(--coral); color: white; }
-  .btn-danger:hover:not(:disabled) { background: #E0605D; }
+  .btn-primary {
+    background: var(--gradient);
+    color: white;
+    font-weight: 700;
+  }
+  .btn-primary:hover:not(:disabled) {
+    box-shadow: 0 0 24px rgba(217,70,168,0.25);
+  }
 
   .btn-ghost {
     background: transparent;
-    color: var(--text-secondary);
-    padding: 6px 12px;
-    font-size: 12px;
+    color: var(--text-mid);
+    padding: 10px 14px;
   }
-  .btn-ghost:hover { background: var(--border-light); }
+  .btn-ghost:hover:not(:disabled) { background: var(--surface-hover); color: var(--text); }
 
-  .btn-sm { padding: 6px 14px; font-size: 12px; border-radius: 8px; }
+  .btn-sm { font-size: 11px; padding: 7px 14px; border-radius: var(--radius-xs); }
+
+  .btn-approve {
+    background: var(--mint-dim);
+    color: var(--mint);
+    border: 1px solid rgba(52,211,153,0.15);
+  }
+  .btn-approve:hover:not(:disabled) { background: rgba(52,211,153,0.18); box-shadow: 0 0 12px rgba(52,211,153,0.1); }
+
+  .btn-subtle {
+    background: var(--surface-raised);
+    color: var(--text-mid);
+    border: 1px solid var(--border);
+  }
+  .btn-subtle:hover:not(:disabled) { background: var(--surface-hover); color: var(--text); }
 
   .spinner {
     display: inline-block;
-    width: 14px; height: 14px;
-    border: 2px solid rgba(255,255,255,0.3);
-    border-top-color: white;
+    width: 14px;
+    height: 14px;
+    border: 2px solid rgba(255,255,255,0.2);
+    border-top-color: currentColor;
     border-radius: 50%;
     animation: spin 0.6s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  /* Cards */
-  .card {
-    background: var(--surface);
-    border: 1px solid var(--border);
+  /* ── Main content ── */
+  .main {
+    flex: 1;
+    padding: 0 36px 64px;
+    max-width: 1200px;
+    width: 100%;
+    margin: 0 auto;
+  }
+
+  /* ── Needs You ── */
+  .needs-you { margin-bottom: 24px; }
+  .needs-you:empty { display: none; }
+
+  .needs-you-banner {
+    position: relative;
     border-radius: var(--radius);
-    box-shadow: var(--shadow);
-    transition: box-shadow 0.2s;
-  }
-  .card + .card { margin-top: 10px; }
-
-  /* Epics */
-  .epic-card { padding: 20px 24px; }
-
-  .epics-summary {
-    margin: 6px 0 14px;
-    font-size: 12px;
-    color: var(--text-tertiary);
-  }
-
-  .epic-lane + .epic-lane { margin-top: 18px; }
-
-  .epic-lane-head {
+    padding: 18px 24px;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
-    margin-bottom: 10px;
-  }
-
-  .epic-lane-title {
-    font-size: 12px;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--text-secondary);
-  }
-
-  .epic-lane-count {
-    font-size: 11px;
-    color: var(--text-tertiary);
-  }
-
-  .epic-counts {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin-top: 12px;
-  }
-
-  .epic-count-chip {
-    font-size: 11px;
-    color: var(--text-secondary);
-    background: var(--border-light);
-    border-radius: 999px;
-    padding: 4px 10px;
-  }
-
-  .epic-top {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 12px;
-  }
-
-  .epic-title { font-size: 15px; font-weight: 600; line-height: 1.4; }
-
-  .badge {
-    font-size: 10px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.8px;
-    padding: 3px 10px;
-    border-radius: 6px;
-    white-space: nowrap;
-    flex-shrink: 0;
-  }
-  .badge-planning { background: var(--violet-soft); color: var(--violet); }
-  .badge-active { background: var(--teal-soft); color: #1A8A7D; }
-  .badge-complete { background: var(--mint); color: #2E7D32; }
-
-  .progress-track {
-    height: 4px;
-    background: var(--border-light);
-    border-radius: 2px;
-    margin-top: 14px;
-    overflow: hidden;
-  }
-  .progress-fill {
-    height: 100%;
-    background: var(--teal);
-    border-radius: 2px;
-    transition: width 0.4s ease;
-  }
-
-  .epic-meta {
-    font-size: 12px;
-    color: var(--text-tertiary);
-    margin-top: 6px;
-  }
-
-  .epic-notes {
-    font-size: 12px;
-    color: var(--text-secondary);
-    margin-top: 14px;
-    padding: 10px 14px;
-    background: var(--border-light);
-    border-radius: var(--radius-sm);
-    line-height: 1.5;
-  }
-
-  .epic-actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-top: 14px;
-  }
-
-  .proposals { margin-top: 6px; }
-
-  .proposal-row {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 12px 0;
-    border-top: 1px solid var(--border-light);
-  }
-
-  .proposal-info { flex: 1; min-width: 0; }
-  .proposal-title {
-    font-size: 13px;
-    font-weight: 500;
-    line-height: 1.4;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .proposal-src {
-    font-size: 10px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.6px;
-    margin-top: 2px;
-  }
-  .proposal-src-claude { color: var(--coral); }
-  .proposal-src-gpt { color: var(--violet); }
-  .proposal-body {
-    font-size: 11px;
-    color: var(--text-tertiary);
-    margin-top: 4px;
-    line-height: 1.5;
-  }
-  .proposal-meta {
-    display: flex;
-    gap: 10px;
-    flex-wrap: wrap;
-    font-size: 11px;
-    color: var(--text-tertiary);
-    margin-top: 6px;
-  }
-
-  .proposal-btns { display: flex; gap: 6px; flex-shrink: 0; }
-
-  .proposal-done {
-    font-size: 12px;
-    font-weight: 500;
-    color: var(--teal);
-    font-family: 'SF Mono', 'Fira Code', monospace;
-  }
-  .proposal-skip {
-    font-size: 12px;
-    color: var(--text-tertiary);
-    text-decoration: line-through;
-  }
-
-  /* Workers */
-  .worker-card {
-    padding: 20px 24px;
-    display: flex;
-    align-items: flex-start;
     gap: 16px;
-  }
-
-  .worker-clickable {
     cursor: pointer;
+    overflow: hidden;
+    background: var(--surface-solid);
+    border: 1px solid rgba(251,191,36,0.12);
+    transition: border-color 0.3s, transform 0.2s;
+  }
+  .needs-you-banner::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(135deg, rgba(251,191,36,0.04) 0%, rgba(251,113,133,0.03) 100%);
+    pointer-events: none;
+  }
+  .needs-you-banner:hover {
+    border-color: rgba(251,191,36,0.25);
+    transform: translateY(-1px);
   }
 
-  .worker-clickable:hover {
-    box-shadow: var(--shadow-lg);
-  }
-
-  .worker-icon {
-    width: 36px; height: 36px;
-    border-radius: 10px;
+  .needs-you-left { display: flex; align-items: center; gap: 16px; position: relative; }
+  .needs-you-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 12px;
+    background: var(--amber-dim);
+    border: 1px solid rgba(251,191,36,0.12);
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 15px;
+    font-size: 18px;
     flex-shrink: 0;
-    font-weight: 700;
-    color: white;
+    color: var(--amber);
   }
-  .worker-icon-coding { background: var(--teal); }
-  .worker-icon-reviewing, .worker-icon-ci_failed, .worker-icon-merge_blocked, .worker-icon-human_review, .worker-icon-awaiting_human_conflict_resolution { background: var(--coral); }
-  .worker-icon-retrying { background: var(--sand); }
-  .worker-icon-pr, .worker-icon-ci, .worker-icon-pushing, .worker-icon-managing { background: var(--violet); }
-  .worker-icon-merging { background: #2E7D32; }
-  .worker-icon-idle, .worker-icon-starting { background: var(--text-tertiary); }
+  .needs-you-text { font-size: 15px; font-weight: 600; color: var(--text-hi); position: relative; }
+  .needs-you-sub { font-size: 12px; color: var(--text-mid); margin-top: 3px; position: relative; }
 
-  .worker-body { flex: 1; min-width: 0; }
+  .needs-you-count {
+    font-family: var(--mono);
+    font-size: 28px;
+    font-weight: 700;
+    color: var(--amber);
+    position: relative;
+    line-height: 1;
+  }
 
-  .worker-phase {
-    font-size: 11px;
+  /* ── Section labels ── */
+  .section-label {
+    font-family: var(--mono);
+    font-size: 10px;
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.8px;
-    margin-bottom: 4px;
+    letter-spacing: 2px;
+    color: var(--text-lo);
+    margin-bottom: 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
   }
-  .worker-phase-coding { color: var(--teal); }
-  .worker-phase-reviewing, .worker-phase-ci_failed, .worker-phase-merge_blocked, .worker-phase-human_review, .worker-phase-awaiting_human_conflict_resolution { color: var(--coral); }
-  .worker-phase-retrying { color: var(--sand); }
-  .worker-phase-pr, .worker-phase-ci, .worker-phase-pushing, .worker-phase-managing { color: var(--violet); }
-  .worker-phase-merging { color: #2E7D32; }
-  .worker-phase-idle, .worker-phase-starting { color: var(--text-tertiary); }
+  .section-label::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+  .count-badge {
+    font-size: 10px;
+    font-weight: 700;
+    background: var(--surface-raised);
+    color: var(--text-mid);
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    letter-spacing: 0;
+  }
 
-  .worker-title {
-    font-size: 15px;
+  /* ── Burndown hero ── */
+  .burndown {
+    border-radius: var(--radius);
+    padding: 28px 32px;
+    margin-bottom: 32px;
+    position: relative;
+    overflow: hidden;
+    background: var(--surface-solid);
+    border: 1px solid var(--border);
+  }
+  .burndown::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: var(--gradient);
+    opacity: 0.5;
+  }
+
+  .burndown-numbers {
+    display: flex;
+    gap: 40px;
+    flex-wrap: wrap;
+  }
+  .burndown-stat { display: flex; flex-direction: column; gap: 4px; }
+  .burndown-num {
+    font-size: 32px;
+    font-weight: 800;
+    font-family: var(--font);
+    line-height: 1;
+    letter-spacing: -1px;
+  }
+  .burndown-num-mint { color: var(--mint); }
+  .burndown-num-blue { color: var(--blue); }
+  .burndown-num-lo { color: var(--text-lo); }
+  .burndown-num-rose { color: var(--rose); }
+
+  .burndown-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--text-lo);
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+  }
+
+  .burndown-track {
+    margin-top: 24px;
+    height: 4px;
+    background: rgba(255,255,255,0.04);
+    border-radius: 2px;
+    overflow: hidden;
+    display: flex;
+    gap: 2px;
+  }
+  .burndown-fill-done {
+    background: var(--mint);
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.8s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .burndown-fill-active {
+    background: var(--blue);
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.8s cubic-bezier(0.22, 1, 0.36, 1);
+    opacity: 0.7;
+  }
+
+  /* ── Two-column lanes ── */
+  .lanes {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    margin-bottom: 32px;
+  }
+
+  .lane { min-width: 0; }
+
+  /* ── Cards ── */
+  .card {
+    background: var(--surface-solid);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    transition: border-color 0.2s;
+  }
+  .card + .card { margin-top: 8px; }
+  .card:hover { border-color: var(--border-bright); }
+
+  /* ── In-flight items ── */
+  .inflight-card {
+    padding: 16px 20px;
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    cursor: pointer;
+    transition: background 0.15s;
+    border-bottom: 1px solid var(--border);
+  }
+  .inflight-card:last-child { border-bottom: none; }
+  .inflight-card:hover { background: var(--surface-hover); }
+
+  .inflight-orb {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    margin-top: 5px;
+    flex-shrink: 0;
+    position: relative;
+  }
+  .orb-coding {
+    background: var(--mint);
+    box-shadow: 0 0 10px rgba(52,211,153,0.5);
+    animation: orb-pulse 2s ease-in-out infinite;
+  }
+  .orb-reviewing {
+    background: var(--glow-3);
+    box-shadow: 0 0 10px rgba(139,92,246,0.4);
+    animation: orb-pulse-v 2.5s ease-in-out infinite;
+  }
+  .orb-shipping {
+    background: var(--blue);
+    box-shadow: 0 0 10px rgba(96,165,250,0.4);
+  }
+  .orb-blocked {
+    background: var(--rose);
+    box-shadow: 0 0 10px rgba(251,113,133,0.4);
+    animation: orb-blocked 1s ease-in-out infinite;
+  }
+  .orb-waiting { background: var(--text-lo); opacity: 0.6; }
+  .orb-queued { background: var(--text-lo); opacity: 0.3; }
+
+  @keyframes orb-pulse {
+    0%, 100% { box-shadow: 0 0 10px rgba(52,211,153,0.5); opacity: 1; }
+    50% { box-shadow: 0 0 4px rgba(52,211,153,0.2); opacity: 0.6; }
+  }
+  @keyframes orb-pulse-v {
+    0%, 100% { box-shadow: 0 0 10px rgba(139,92,246,0.4); opacity: 1; }
+    50% { box-shadow: 0 0 4px rgba(139,92,246,0.15); opacity: 0.6; }
+  }
+  @keyframes orb-blocked {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  .inflight-body { flex: 1; min-width: 0; }
+  .inflight-top {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .inflight-issue {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-lo);
+    flex-shrink: 0;
+  }
+  .inflight-title {
+    font-size: 13px;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text);
+  }
+  .inflight-meta {
+    margin-top: 4px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .phase-tag {
+    font-family: var(--mono);
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    padding: 2px 8px;
+    border-radius: 4px;
+  }
+  .phase-tag-coding { color: var(--mint); background: var(--mint-dim); }
+  .phase-tag-reviewing { color: var(--glow-3); background: rgba(139,92,246,0.1); }
+  .phase-tag-shipping { color: var(--blue); background: var(--blue-dim); }
+  .phase-tag-blocked { color: var(--rose); background: var(--rose-dim); }
+  .phase-tag-waiting { color: var(--text-lo); background: var(--surface-raised); }
+
+  .inflight-detail {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text-lo);
+    letter-spacing: 0.3px;
+  }
+
+  /* ── Epic cards ── */
+  .epic-card {
+    padding: 20px 22px;
+    border-bottom: 1px solid var(--border);
+  }
+  .epic-card:last-child { border-bottom: none; }
+
+  .epic-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .epic-title {
+    font-size: 14px;
     font-weight: 600;
     line-height: 1.35;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    color: var(--text-hi);
   }
-
-  .worker-branch {
-    font-size: 12px;
-    color: var(--text-tertiary);
-    font-family: 'SF Mono', 'Fira Code', monospace;
-    margin-top: 2px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .worker-meta {
-    margin-top: 8px;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    font-size: 11px;
-    color: var(--text-tertiary);
-  }
-
-  .worker-chip {
-    background: var(--border-light);
+  .epic-badge {
+    font-family: var(--mono);
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    padding: 3px 10px;
     border-radius: 999px;
-    padding: 3px 9px;
+    flex-shrink: 0;
+  }
+  .epic-badge-active { color: var(--mint); background: var(--mint-dim); border: 1px solid rgba(52,211,153,0.12); }
+  .epic-badge-planning { color: var(--glow-3); background: rgba(139,92,246,0.08); border: 1px solid rgba(139,92,246,0.12); }
+  .epic-badge-complete { color: var(--mint); background: var(--mint-dim); border: 1px solid rgba(52,211,153,0.12); }
+
+  .epic-progress { margin-top: 14px; }
+  .epic-progress-track {
+    height: 3px;
+    background: rgba(255,255,255,0.04);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .epic-progress-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.8s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .epic-fill-active { background: linear-gradient(90deg, var(--glow-1), var(--glow-2)); }
+  .epic-fill-complete { background: var(--mint); }
+
+  .epic-progress-text {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text-lo);
+    margin-top: 8px;
+    letter-spacing: 0.3px;
   }
 
-  .worker-actions {
-    margin-left: auto;
+  /* ── Done list ── */
+  .done-item {
     display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 8px;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border);
+    transition: background 0.15s;
+  }
+  .done-item:last-child { border-bottom: none; }
+  .done-item:hover { background: var(--surface-hover); }
+
+  .done-check {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--mint-dim);
+    border: 1px solid rgba(52,211,153,0.15);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .done-check svg { width: 10px; height: 10px; color: var(--mint); }
+
+  .done-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13px;
+    color: var(--text-mid);
+  }
+  .done-issue {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text-lo);
     flex-shrink: 0;
   }
 
-  .worker-manage-btn {
-    min-width: 84px;
+  /* ── Drawer ── */
+  .drawer-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.55);
+    backdrop-filter: blur(4px);
+    z-index: 50;
+    display: none;
+    opacity: 0;
+    transition: opacity 0.25s;
   }
+  .drawer-overlay.open { display: block; opacity: 1; }
 
-  .worker-manage-note {
-    font-size: 11px;
-    color: var(--text-tertiary);
-    text-align: right;
-    line-height: 1.4;
+  .drawer {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(540px, 92vw);
+    background: var(--surface-solid);
+    border-left: 1px solid var(--border-bright);
+    z-index: 51;
+    display: none;
+    flex-direction: column;
+    transform: translateX(100%);
+    transition: transform 0.3s cubic-bezier(0.22, 1, 0.36, 1);
   }
+  .drawer.open { display: flex; transform: translateX(0); }
 
-  /* Empty states */
-  .empty-state {
-    padding: 40px 24px;
-    text-align: center;
+  .drawer-head {
+    padding: 22px 28px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
   }
-  .empty-state p {
-    font-size: 13px;
-    color: var(--text-tertiary);
-    line-height: 1.6;
+  .drawer-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text-hi);
+    letter-spacing: -0.3px;
   }
-  .empty-state code {
-    font-size: 12px;
-    font-family: 'SF Mono', 'Fira Code', monospace;
-    background: var(--border-light);
-    padding: 2px 7px;
-    border-radius: 5px;
-    color: var(--text-secondary);
+  .drawer-close {
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    color: var(--text-mid);
+    font-size: 18px;
+    cursor: pointer;
+    padding: 4px 10px;
+    border-radius: var(--radius-xs);
+    line-height: 1;
+    transition: all 0.15s;
   }
+  .drawer-close:hover { background: var(--surface-hover); color: var(--text-hi); }
 
-  /* Timeline */
-  .timeline-card {
-    max-height: 320px;
+  .drawer-body {
+    flex: 1;
     overflow-y: auto;
-    overscroll-behavior: contain;
+    padding: 20px 28px;
   }
-  .timeline-card::-webkit-scrollbar { width: 0; }
 
+  .drawer-section { margin-bottom: 28px; }
+  .drawer-section-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--text-lo);
+    margin-bottom: 12px;
+  }
+
+  .proposal-card {
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 16px 18px;
+    margin-bottom: 10px;
+    transition: border-color 0.2s;
+  }
+  .proposal-card:hover { border-color: var(--border-bright); }
+
+  .proposal-title { font-size: 13px; font-weight: 600; color: var(--text-hi); line-height: 1.4; }
+  .proposal-body { font-size: 12px; color: var(--text-mid); margin-top: 6px; line-height: 1.5; max-height: 56px; overflow: hidden; }
+  .proposal-meta {
+    margin-top: 10px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text-lo);
+  }
+  .proposal-source { font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; }
+  .proposal-source-claude { color: var(--glow-2); }
+  .proposal-source-gpt { color: var(--glow-3); }
+  .proposal-actions { margin-top: 12px; display: flex; gap: 8px; }
+
+  /* ── Feature Ideas ── */
+  .feature-idea-card {
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--glow-3);
+    border-radius: var(--radius-sm);
+    padding: 14px 16px;
+    margin-bottom: 8px;
+    transition: border-color 0.2s;
+  }
+  .feature-idea-card:hover { border-color: var(--border-bright); }
+  .feature-idea-title { font-size: 13px; font-weight: 600; color: var(--text-hi); line-height: 1.4; }
+  .feature-idea-desc { font-size: 12px; color: var(--text-mid); margin-top: 5px; line-height: 1.5; max-height: 42px; overflow: hidden; }
+  .feature-priority-badge {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-top: 6px;
+  }
+  .feature-priority-badge.high { background: var(--rose-dim); color: var(--rose); }
+  .feature-priority-badge.medium { background: var(--amber-dim); color: var(--amber); }
+  .feature-priority-badge.low { background: var(--surface); color: var(--text-mid); }
+  .feature-rationale {
+    font-size: 12px;
+    color: var(--text-mid);
+    margin-top: 8px;
+    line-height: 1.5;
+    display: none;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+  }
+  .feature-rationale.open { display: block; }
+  .feature-idea-toggle {
+    font-size: 11px;
+    color: var(--text-lo);
+    cursor: pointer;
+    margin-top: 6px;
+    font-family: var(--mono);
+  }
+  .feature-idea-toggle:hover { color: var(--text-mid); }
+  .feature-actions { margin-top: 12px; display: flex; gap: 8px; }
+
+  /* ── Interview ── */
+  .interview-form { margin-bottom: 20px; }
+  .interview-input {
+    width: 100%;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 12px 14px;
+    font-family: var(--font);
+    font-size: 13px;
+    color: var(--text-hi);
+    resize: vertical;
+    min-height: 60px;
+  }
+  .interview-input:focus { outline: none; border-color: var(--glow-3); }
+  .interview-input::placeholder { color: var(--text-lo); }
+  .interview-card {
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--glow-2);
+    border-radius: var(--radius-sm);
+    padding: 14px 16px;
+    margin-bottom: 10px;
+  }
+  .interview-q { font-size: 13px; font-weight: 500; color: var(--text-hi); line-height: 1.4; }
+  .interview-why { font-size: 11px; color: var(--text-lo); margin-top: 4px; font-style: italic; }
+  .interview-answer-input {
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    padding: 8px 10px;
+    font-family: var(--font);
+    font-size: 12px;
+    color: var(--text-hi);
+    margin-top: 8px;
+    resize: vertical;
+    min-height: 36px;
+  }
+  .interview-answer-input:focus { outline: none; border-color: var(--glow-2); }
+
+  .triage-item {
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 14px 18px;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    transition: border-color 0.2s;
+  }
+  .triage-item:hover { border-color: var(--border-bright); }
+  .triage-num {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-lo);
+    flex-shrink: 0;
+  }
+  .triage-info { flex: 1; min-width: 0; }
+  .triage-title {
+    font-size: 13px;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text);
+  }
+  .triage-btns { display: flex; gap: 6px; flex-shrink: 0; }
+
+  /* ── Log modal ── */
   .log-modal {
     position: fixed;
     inset: 0;
-    background: rgba(14, 23, 24, 0.45);
+    background: rgba(0,0,0,0.65);
+    backdrop-filter: blur(4px);
     display: none;
     align-items: center;
     justify-content: center;
+    z-index: 60;
     padding: 24px;
-    z-index: 30;
   }
-
-  .log-modal.open {
-    display: flex;
-  }
+  .log-modal.open { display: flex; }
 
   .log-panel {
-    width: min(960px, 100%);
-    max-height: min(82vh, 860px);
-    background: #102021;
-    color: #D8F1EF;
-    border-radius: 18px;
-    box-shadow: 0 18px 60px rgba(0,0,0,0.28);
+    width: min(980px, 100%);
+    max-height: 84vh;
+    background: #0A0D12;
+    border: 1px solid var(--border-bright);
+    border-radius: var(--radius);
     overflow: hidden;
     display: flex;
     flex-direction: column;
+    box-shadow: 0 32px 100px rgba(0,0,0,0.6);
   }
 
   .log-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
-    padding: 16px 18px;
-    border-bottom: 1px solid rgba(255,255,255,0.08);
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(255,255,255,0.02);
   }
-
-  .log-title {
-    font-size: 14px;
-    font-weight: 700;
-    color: white;
-  }
-
-  .log-subtitle {
-    font-size: 11px;
-    color: #8DB8B4;
-    margin-top: 4px;
-    font-family: 'SF Mono', 'Fira Code', monospace;
-  }
-
+  .log-head-info { display: flex; flex-direction: column; gap: 2px; }
+  .log-title { font-size: 13px; font-weight: 700; color: var(--text-hi); }
+  .log-subtitle { font-family: var(--mono); font-size: 10px; color: var(--text-lo); }
   .log-close {
-    background: transparent;
-    color: #8DB8B4;
-    border: none;
-    font-size: 22px;
-    line-height: 1;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    color: var(--text-mid);
+    font-size: 16px;
     cursor: pointer;
-    padding: 4px 8px;
+    padding: 4px 10px;
+    border-radius: var(--radius-xs);
+    line-height: 1;
   }
+  .log-close:hover { background: var(--surface-hover); color: var(--text-hi); }
 
-  .log-body {
-    padding: 0;
-    overflow: auto;
-    background: #102021;
-  }
-
+  .log-body { flex: 1; overflow: auto; }
   .log-pre {
     margin: 0;
-    padding: 18px;
-    min-height: 240px;
-    font-size: 12px;
-    line-height: 1.55;
+    padding: 18px 20px;
+    font-size: 11px;
+    line-height: 1.65;
+    font-family: var(--mono);
+    color: #8B95A5;
     white-space: pre-wrap;
     word-break: break-word;
-    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    min-height: 200px;
   }
 
-  .log-empty {
-    color: #8DB8B4;
-  }
-
-  .ev-row {
-    display: flex;
-    align-items: flex-start;
-    gap: 12px;
-    padding: 10px 20px;
-    border-top: 1px solid var(--border-light);
+  /* ── Empty state ── */
+  .empty {
+    padding: 40px 24px;
+    text-align: center;
+    color: var(--text-lo);
     font-size: 13px;
+    line-height: 1.7;
   }
-  .ev-row:first-child { border-top: none; }
+  .empty strong { color: var(--text-mid); font-weight: 600; }
 
-  .ev-dot {
-    width: 6px; height: 6px;
-    border-radius: 50%;
-    margin-top: 6px;
-    flex-shrink: 0;
+  /* ── System health floating chip ── */
+  .system-health {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    z-index: 10;
+    display: none;
   }
-  .ev-text { flex: 1; color: var(--text-secondary); line-height: 1.45; }
-  .ev-when {
-    font-size: 11px;
-    color: var(--text-tertiary);
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
-    margin-left: 8px;
-    flex-shrink: 0;
-  }
-
-  /* Stats */
-  .stats-row {
-    display: flex;
-    justify-content: center;
-    gap: 48px;
-    padding: 8px 0 0;
-  }
-  .stat { text-align: center; }
-  .stat-num {
-    font-size: 26px;
-    font-weight: 700;
-    font-variant-numeric: tabular-nums;
-    line-height: 1.2;
-  }
-  .stat-num-teal { color: var(--teal); }
-  .stat-num-coral { color: var(--coral); }
-  .stat-num-sand { color: var(--sand); }
-  .stat-lbl {
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    color: var(--text-tertiary);
-    margin-top: 2px;
-  }
-
-  /* Triage */
-  .triage-row {
+  .system-health.visible { display: flex; }
+  .health-chip {
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 14px 20px;
-    border-top: 1px solid var(--border-light);
-  }
-  .triage-row:first-child { border-top: none; }
-
-  .triage-num {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-tertiary);
-    font-family: 'SF Mono', 'Fira Code', monospace;
-    flex-shrink: 0;
-    min-width: 36px;
-  }
-  .triage-info { flex: 1; min-width: 0; }
-  .triage-title {
-    font-size: 13px;
-    font-weight: 500;
-    line-height: 1.4;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .triage-body {
+    gap: 10px;
+    background: var(--surface-solid);
+    border: 1px solid var(--border-bright);
+    border-radius: 999px;
+    padding: 10px 18px;
+    font-family: var(--mono);
     font-size: 11px;
-    color: var(--text-tertiary);
-    margin-top: 2px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    color: var(--text-mid);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
   }
-  .triage-labels {
-    display: flex;
-    gap: 4px;
-    margin-top: 4px;
-  }
-  .triage-label {
-    font-size: 10px;
-    padding: 1px 7px;
-    border-radius: 4px;
-    background: var(--border-light);
-    color: var(--text-secondary);
-  }
-  .triage-btns { display: flex; gap: 6px; flex-shrink: 0; }
-
-  .triage-count {
-    font-size: 12px;
-    color: var(--text-tertiary);
-    font-weight: 500;
-    margin-left: auto;
+  .health-chip-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--amber);
+    animation: breathe-amber 1.5s ease-in-out infinite;
   }
 
-  /* Animations */
-  @keyframes slideIn {
-    from { opacity: 0; transform: translateY(6px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
-  .card[data-new] { animation: slideIn 0.25s ease; }
-
-  @media (max-width: 720px) {
-    .run-grid {
-      grid-template-columns: 1fr;
-    }
+  /* ── Responsive ── */
+  @media (max-width: 780px) {
+    .lanes { grid-template-columns: 1fr; }
+    .topbar, .feature-bar, .main { padding-left: 18px; padding-right: 18px; }
+    .burndown-numbers { gap: 24px; }
+    .burndown-num { font-size: 24px; }
   }
 </style>
 </head>
 <body>
-<div class="shell">
 
-  <header>
-    <div class="logo-group">
+<div class="grain"></div>
+
+<div class="app">
+
+  <!-- Topbar -->
+  <div class="topbar reveal reveal-1">
+    <div class="topbar-left">
       <span class="logo">agentify</span>
-      <span class="repo-name" id="repo"></span>
+      <span class="repo-badge" id="repo"></span>
     </div>
-    <div class="header-status">
-      <span class="pill pill-idle" id="pill">idle</span>
-      <div class="beacon" id="beacon"></div>
+    <div class="topbar-right">
+      <div class="status-chip status-idle" id="status-chip">
+        <div class="status-dot"></div>
+        <span id="status-text">idle</span>
+      </div>
     </div>
-  </header>
+  </div>
 
-  <div class="plan-bar">
-    <input type="text" id="plan-input" placeholder="Describe a feature to plan...">
-    <div class="plan-actions">
-      <button class="btn btn-ghost" id="group-btn">Group Existing</button>
+  <!-- Feature bar -->
+  <div class="feature-bar reveal reveal-2">
+    <div class="feature-input-wrap">
+      <input type="text" id="feature-input" placeholder="Describe a feature or enhancement...">
+      <button class="btn btn-ghost btn-sm" id="group-btn">Group Issues</button>
       <button class="btn btn-primary" id="plan-btn">Plan</button>
     </div>
   </div>
 
-  <div class="section">
-    <div class="section-head">Run Status</div>
-    <div class="card run-card">
-      <div class="run-grid">
-        <div class="run-block">
-          <div class="run-label">Now Running</div>
-          <div class="run-count" id="run-active-count">0</div>
-          <div class="run-list" id="run-active-list">
-            <div class="run-empty">No active workers.</div>
-          </div>
-        </div>
-        <div class="run-block">
-          <div class="run-label">Queued Next</div>
-          <div class="run-count" id="run-queue-count">0</div>
-          <div class="run-list" id="run-queue-list">
-            <div class="run-empty">No queued issues.</div>
-          </div>
-        </div>
-        <div class="run-block">
-          <div class="run-label">Latest Event</div>
-          <div class="run-latest" id="run-latest"><strong>Waiting</strong><br>No events yet.</div>
-        </div>
-      </div>
-      <div class="run-note" id="run-note"></div>
-    </div>
-  </div>
+  <!-- Main -->
+  <div class="main">
 
-  <div id="triage-section" class="section" style="display:none">
-    <div class="section-head">
-      Triage
-      <span class="triage-count" id="triage-count"></span>
-    </div>
-    <div class="card" id="triage-list"></div>
-  </div>
+    <!-- Needs You -->
+    <div class="needs-you reveal reveal-2" id="needs-you"></div>
 
-  <div id="epics-section" class="section" style="display:none">
-    <div class="section-head">Epics</div>
-    <div class="epics-summary" id="epics-summary"></div>
-    <div id="epics"></div>
-  </div>
-
-  <div class="section">
-    <div class="section-head">Workers</div>
-    <div id="workers">
-      <div class="card" id="workers-empty">
-        <div class="empty-state">
-          <p>No active workers.<br>Label an issue with <code>agent</code> or plan an epic above.</p>
+    <!-- Burndown -->
+    <div class="burndown reveal reveal-3" id="burndown">
+      <div class="burndown-numbers">
+        <div class="burndown-stat">
+          <span class="burndown-num burndown-num-mint" id="bd-done">0</span>
+          <span class="burndown-label">shipped</span>
+        </div>
+        <div class="burndown-stat">
+          <span class="burndown-num burndown-num-blue" id="bd-active">0</span>
+          <span class="burndown-label">in flight</span>
+        </div>
+        <div class="burndown-stat">
+          <span class="burndown-num burndown-num-lo" id="bd-queued">0</span>
+          <span class="burndown-label">queued</span>
+        </div>
+        <div class="burndown-stat">
+          <span class="burndown-num burndown-num-rose" id="bd-blocked">0</span>
+          <span class="burndown-label">blocked</span>
         </div>
       </div>
-    </div>
-  </div>
-
-  <div class="section">
-    <div class="section-head">Activity</div>
-    <div class="card timeline-card" id="timeline">
-      <div class="empty-state" id="tl-empty">
-        <p>No events yet.</p>
+      <div class="burndown-track">
+        <div class="burndown-fill-done" id="bd-fill-done" style="width:0%"></div>
+        <div class="burndown-fill-active" id="bd-fill-active" style="width:0%"></div>
       </div>
     </div>
-  </div>
 
-  <div class="stats-row">
-    <div class="stat">
-      <div class="stat-num stat-num-teal" id="s-done">0</div>
-      <div class="stat-lbl">Completed</div>
-    </div>
-    <div class="stat">
-      <div class="stat-num stat-num-coral" id="s-err">0</div>
-      <div class="stat-lbl">Errors</div>
-    </div>
-    <div class="stat">
-      <div class="stat-num stat-num-sand" id="s-up">0s</div>
-      <div class="stat-lbl">Uptime</div>
-    </div>
-  </div>
-
-  <div class="log-modal" id="log-modal">
-    <div class="log-panel">
-      <div class="log-head">
-        <div>
-          <div class="log-title" id="log-title">Worker Log</div>
-          <div class="log-subtitle" id="log-subtitle">Waiting for selection</div>
+    <!-- Lanes: In Flight + Epics -->
+    <div class="lanes reveal reveal-4">
+      <div class="lane">
+        <div class="section-label">
+          In Flight
+          <span class="count-badge" id="inflight-count">0</span>
         </div>
-        <button class="log-close" id="log-close" aria-label="Close">×</button>
+        <div class="card" id="inflight-list">
+          <div class="empty"><strong>Nothing in flight.</strong><br>Plan a feature or assign issues to start.</div>
+        </div>
       </div>
-      <div class="log-body">
-        <pre class="log-pre" id="log-pre">Select a running issue to view live Codex logs.</pre>
+      <div class="lane">
+        <div class="section-label">
+          Epics
+          <span class="count-badge" id="epics-count">0</span>
+        </div>
+        <div class="card" id="epics-list">
+          <div class="empty"><strong>No epics yet.</strong><br>Describe a feature above to create one.</div>
+        </div>
       </div>
     </div>
-  </div>
 
+    <!-- Done -->
+    <div class="reveal reveal-5">
+      <div class="section-label">
+        Recently Shipped
+        <span class="count-badge" id="done-count">0</span>
+      </div>
+      <div class="card" id="done-list">
+        <div class="empty"><strong>Nothing shipped yet.</strong><br>Completed work will appear here.</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Drawer -->
+<div class="drawer-overlay" id="drawer-overlay"></div>
+<div class="drawer" id="drawer">
+  <div class="drawer-head">
+    <span class="drawer-title">Needs Attention</span>
+    <button class="drawer-close" id="drawer-close">&times;</button>
+  </div>
+  <div class="drawer-body" id="drawer-body"></div>
+</div>
+
+<!-- Log modal -->
+<div class="log-modal" id="log-modal">
+  <div class="log-panel">
+    <div class="log-head">
+      <div class="log-head-info">
+        <div class="log-title" id="log-title">Worker Log</div>
+        <div class="log-subtitle" id="log-subtitle"></div>
+      </div>
+      <button class="log-close" id="log-close">&times;</button>
+    </div>
+    <div class="log-body">
+      <pre class="log-pre" id="log-pre">Select an in-flight issue to view live logs.</pre>
+    </div>
+  </div>
+</div>
+
+<!-- System health chip -->
+<div class="system-health" id="system-health">
+  <div class="health-chip">
+    <div class="health-chip-dot"></div>
+    <span id="health-text">Self-repairing...</span>
+  </div>
 </div>
 
 <script>
-// -- State --
-let evCount = 0, t0 = Date.now();
-let prevWorkerKeys = new Set();
-let prevEpicData = '';
+// ─── State ───
+let evCount = 0;
 let planning = false;
 let grouping = false;
-let latestEvent = null;
-let currentWorkersCache = {};
-let currentQueueCache = [];
 let selectedLogIssue = null;
 let logPollTimer = null;
-let pendingManageIssues = new Set();
+let notificationsGranted = false;
+let lastNeedsYouCount = 0;
+let allEvents = [];
 
-const phaseLabel = {
-  idle:'Idle', starting:'Starting', coding:'Coding',
-  reviewing:'Reviewing', retrying:'Retrying',
-  managing:'Managing',
-  pr:'Opening PR', pushing:'Pushing',
-  ci:'CI Checks', ci_failed:'CI Failed',
-  merging:'Merging', merge_blocked:'Merge Blocked',
-  human_review:'Needs Human Review',
-  awaiting_human_conflict_resolution:'Needs Human Conflict Resolution'
+// 12 internal phases → 4 user categories
+const PHASE_CAT = {
+  idle:'waiting', starting:'waiting',
+  coding:'coding',
+  pushing:'shipping', pr:'shipping',
+  ci:'shipping', ci_failed:'blocked',
+  reviewing:'reviewing',
+  retrying:'coding',
+  merging:'shipping', merge_blocked:'blocked',
+  human_review:'blocked',
+  awaiting_human_conflict_resolution:'blocked',
+  managing:'coding'
 };
 
-const phaseIcon = {
-  coding:'C', reviewing:'R', retrying:'!', managing:'MG', pr:'PR', pushing:'↑', ci:'CI', ci_failed:'CI',
-  merging:'M', merge_blocked:'!', human_review:'H', awaiting_human_conflict_resolution:'H',
-  idle:'~', starting:'...'
+const PHASE_DISPLAY = {
+  coding:'Coding', reviewing:'Reviewing',
+  shipping:'Shipping', blocked:'Blocked',
+  waiting:'Starting'
 };
 
-const evColor = {
-  loop_start:'var(--teal)', issue_picked:'var(--sand)',
-  coding_start:'var(--teal)', coding_done:'var(--teal)',
-  review_start:'var(--coral)', review_done:'var(--coral)',
-  pr_created:'var(--violet)', pr_merged:'var(--teal)',
-  ci_waiting:'var(--violet)', ci_passed:'var(--teal)', ci_failed:'var(--coral)',
-  error:'var(--coral)', idle:'var(--sand)', retry:'var(--sand)',
-  merge_blocked:'var(--coral)',
-  manage_start:'var(--violet)', manage_done:'var(--teal)', manage_deferred:'var(--sand)',
-  loop_end:'var(--teal)', plan_start:'var(--violet)', plan_done:'var(--violet)',
-  plan_claude:'var(--coral)', plan_gpt:'var(--sand)',
-  epic_complete:'var(--teal)', issue_approved:'var(--teal)',
-  group_start:'var(--violet)', group_done:'var(--violet)',
-  group_claude:'var(--coral)', group_approved:'var(--teal)',
-  group_wave_started:'var(--sand)', group_complete:'var(--teal)'
+const PHASE_DETAIL = {
+  idle:'Idle', starting:'Starting', coding:'Writing code',
+  pushing:'Pushing branch', pr:'Opening PR',
+  ci:'Running CI', ci_failed:'CI failed',
+  reviewing:'Code review', retrying:'Fixing feedback',
+  merging:'Merging', merge_blocked:'Merge conflict',
+  human_review:'Review failed',
+  awaiting_human_conflict_resolution:'Conflict resolution',
+  managing:'Manager resolving'
 };
 
-// -- Utilities --
-function ago(ts) {
-  const s = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
-  if (s < 5) return 'now';
-  if (s < 60) return s + 's';
-  if (s < 3600) return Math.floor(s / 60) + 'm';
-  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
-  return m > 0 ? h + 'h ' + m + 'm' : h + 'h';
-}
-function uptime() {
-  const s = Math.floor((Date.now() - t0) / 1000);
-  if (s < 60) return s + 's';
-  if (s < 3600) return Math.floor(s / 60) + 'm';
-  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
-  return m > 0 ? h + 'h ' + m + 'm' : h + 'h';
-}
-
-function $(id) { return document.getElementById(id); }
-
-function openWorkerLog(issue, title) {
-  selectedLogIssue = String(issue);
-  $('log-title').textContent = '#' + issue + ' ' + (title || 'Worker Log');
-  $('log-subtitle').textContent = 'Live Codex output';
-  $('log-pre').textContent = 'Loading live log...';
-  $('log-modal').classList.add('open');
-  fetchWorkerLog();
-  if (logPollTimer) clearInterval(logPollTimer);
-  logPollTimer = setInterval(fetchWorkerLog, 2000);
-}
-
-function closeWorkerLog() {
-  $('log-modal').classList.remove('open');
-  selectedLogIssue = null;
-  if (logPollTimer) {
-    clearInterval(logPollTimer);
-    logPollTimer = null;
+// ─── Notifications ───
+function requestNotifications() {
+  if ('Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission().then(p => { notificationsGranted = p === 'granted'; });
+  } else if ('Notification' in window) {
+    notificationsGranted = Notification.permission === 'granted';
   }
 }
 
-async function fetchWorkerLog() {
-  if (!selectedLogIssue) return;
-  try {
-    const res = await fetch('/worker-log?issue=' + encodeURIComponent(selectedLogIssue));
-    const data = await res.json();
-    const pre = $('log-pre');
-    if (!data.exists) {
-      pre.textContent = 'No live log file yet for #' + selectedLogIssue + '.';
-      pre.className = 'log-pre log-empty';
-      return;
-    }
-    pre.textContent = data.content || 'Log file is empty.';
-    pre.className = 'log-pre';
-    const body = pre.parentElement;
-    body.scrollTop = body.scrollHeight;
-  } catch (e) {
-    $('log-pre').textContent = 'Failed to load log.';
-    $('log-pre').className = 'log-pre log-empty';
+function notify(title, body) {
+  if (notificationsGranted && document.hidden) {
+    try { new Notification(title, { body }); } catch(e) {}
   }
 }
 
-function activePause(state = {}) {
-  const until = Number(state.paused_until_epoch || 0);
-  if (!until) return null;
-  const now = Math.floor(Date.now() / 1000);
-  if (until <= now) return null;
-  return {
-    until,
-    untilIso: state.paused_until || '',
-    reason: state.pause_reason || '',
-    kind: state.pause_kind || ''
-  };
+// ─── API ───
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  return res.json();
 }
 
-function formatRemaining(seconds) {
-  if (seconds <= 0) return 'less than a minute';
-  const mins = Math.ceil(seconds / 60);
-  if (mins < 60) return mins + 'm';
-  const hours = Math.floor(mins / 60);
-  const rem = mins % 60;
-  return rem === 0 ? hours + 'h' : hours + 'h ' + rem + 'm';
-}
-
-function renderRunSummary(state = {}) {
-  const workers = Object.entries(state.workers || {});
-  const runningWorkers = workers.filter(([, worker]) => worker.active);
-  const queued = state.queued_issues || [];
-  const pause = activePause(state);
-
-  $('run-active-count').textContent = String(runningWorkers.length);
-  $('run-queue-count').textContent = String(queued.length);
-
-  const activeList = $('run-active-list');
-  if (runningWorkers.length === 0) {
-    activeList.innerHTML = '<div class="run-empty">No active workers.</div>';
-  } else {
-    activeList.innerHTML = runningWorkers
-      .sort((a, b) => Number(a[0]) - Number(b[0]))
-      .map(([num, worker]) => {
-        const phase = phaseLabel[worker.phase || 'idle'] || (worker.phase || 'idle');
-        return '<button class="run-item run-item-btn" data-log-issue="' + esc(num) + '" data-log-title="' + esc(worker.title || '') + '"><strong>#' + esc(num) + '</strong>' + esc(worker.title || '') + ' · ' + esc(phase) + '</button>';
-      })
-      .join('');
-  }
-
-  const queueList = $('run-queue-list');
-  if (queued.length === 0) {
-    queueList.innerHTML = '<div class="run-empty">No queued issues.</div>';
-  } else {
-    queueList.innerHTML = queued
-      .slice(0, 5)
-      .map(issue => '<div class="run-item"><strong>#' + esc(issue.number) + '</strong>' + esc(issue.title || '') + '</div>')
-      .join('');
-  }
-
-  const latest = $('run-latest');
-  if (!latestEvent) {
-    latest.innerHTML = '<strong>Waiting</strong><br>No events yet.';
-  } else {
-    latest.innerHTML = '<strong>' + esc(ago(latestEvent.ts)) + '</strong><br>' + esc(latestEvent.msg || '');
-  }
-
-  const note = $('run-note');
-  if (!pause) {
-    note.style.display = 'none';
-    note.innerHTML = '';
-  } else {
-    const seconds = Math.max(0, pause.until - Math.floor(Date.now() / 1000));
-    note.style.display = 'block';
-    note.innerHTML = '<strong>Dispatch paused.</strong> New Codex work is on hold for '
-      + esc(formatRemaining(seconds))
-      + '.<br>'
-      + esc(pause.reason || 'Quota or billing issue detected.')
-      + (pause.untilIso ? '<br>Retry after ' + esc(pause.untilIso) + '.' : '');
-  }
-}
-
-// -- Plan --
-async function submitPlan() {
-  const input = $('plan-input');
-  const btn = $('plan-btn');
-  const desc = input.value.trim();
-  if (!desc || planning) return;
-
-  planning = true;
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span>';
-  input.disabled = true;
-
-  try {
-    const res = await fetch('/plan', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ description: desc })
-    });
-    const data = await res.json();
-    if (data.error) alert('Planning failed: ' + data.error);
-    else { input.value = ''; fetchEpics(); }
-  } catch (e) {
-    alert('Error: ' + e.message);
-  }
-
-  planning = false;
-  btn.disabled = false;
-  btn.textContent = 'Plan';
-  input.disabled = false;
-}
-
-$('plan-btn').addEventListener('click', submitPlan);
-$('plan-input').addEventListener('keydown', e => { if (e.key === 'Enter') submitPlan(); });
-
-async function submitExistingGrouping() {
-  const btn = $('group-btn');
-  if (grouping) return;
-
-  grouping = true;
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span>';
-
-  try {
-    const res = await fetch('/group-existing', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' }
-    });
-    const data = await res.json();
-    if (data.error) alert('Grouping failed: ' + data.error);
-    else fetchEpics();
-  } catch (e) {
-    alert('Error: ' + e.message);
-  }
-
-  grouping = false;
-  btn.disabled = false;
-  btn.textContent = 'Group Existing';
-}
-
-$('group-btn').addEventListener('click', submitExistingGrouping);
-
-// -- Triage --
-let prevTriageData = '';
-
-async function fetchTriage() {
-  try {
-    const res = await fetch('/triage');
-    const data = await res.json();
-    const json = JSON.stringify(data.issues || []);
-    if (json !== prevTriageData) {
-      prevTriageData = json;
-      renderTriage(data.issues || []);
-    }
-  } catch (e) {}
-}
-
-function renderTriage(issues) {
-  const section = $('triage-section');
-  const container = $('triage-list');
-  const countEl = $('triage-count');
-
-  if (issues.length === 0) { section.style.display = 'none'; return; }
-  section.style.display = '';
-  countEl.textContent = issues.length + ' issues';
-
-  container.innerHTML = '';
-  issues.forEach(issue => {
-    const row = document.createElement('div');
-    row.className = 'triage-row';
-    row.id = 'triage-' + issue.number;
-
-    let labels = '';
-    if (issue.labels && issue.labels.length > 0) {
-      labels = '<div class="triage-labels">'
-        + issue.labels.map(l => '<span class="triage-label">' + esc(l) + '</span>').join('')
-        + '</div>';
-    }
-
-    row.innerHTML = '<span class="triage-num">#' + issue.number + '</span>'
-      + '<div class="triage-info">'
-      + '<div class="triage-title">' + esc(issue.title) + '</div>'
-      + (issue.body ? '<div class="triage-body">' + esc(issue.body) + '</div>' : '')
-      + labels
-      + '</div>'
-      + '<div class="triage-btns">'
-      + '<button class="btn btn-primary btn-sm" onclick="triageAssign(' + issue.number + ', this)">Assign</button>'
-      + '<button class="btn btn-ghost btn-sm" onclick="triageSkip(' + issue.number + ', this)">Skip</button>'
-      + '</div>';
-
-    container.appendChild(row);
-  });
-}
-
-async function triageAssign(num, btn) {
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span>';
-  await fetch('/triage/assign', {
+async function postApi(path, body) {
+  return api(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ number: num })
-  });
-  // Remove row with animation
-  const row = $('triage-' + num);
-  if (row) { row.style.opacity = '0'; row.style.transition = 'opacity 0.2s'; setTimeout(() => { row.remove(); updateTriageCount(); }, 200); }
-  else fetchTriage();
-}
-
-async function triageSkip(num, btn) {
-  btn.disabled = true;
-  btn.textContent = '...';
-  await fetch('/triage/skip', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ number: num })
-  });
-  const row = $('triage-' + num);
-  if (row) { row.style.opacity = '0'; row.style.transition = 'opacity 0.2s'; setTimeout(() => { row.remove(); updateTriageCount(); }, 200); }
-  else fetchTriage();
-}
-
-function updateTriageCount() {
-  const container = $('triage-list');
-  const remaining = container.querySelectorAll('.triage-row').length;
-  $('triage-count').textContent = remaining > 0 ? remaining + ' issues' : '';
-  if (remaining === 0) $('triage-section').style.display = 'none';
-}
-
-// -- Approve / Reject --
-async function approveIssue(epicId, index) {
-  await fetch('/approve', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ epic_id: epicId, index })
-  });
-  fetchEpics();
-}
-
-async function rejectIssue(epicId, index) {
-  await fetch('/reject', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ epic_id: epicId, index })
-  });
-  fetchEpics();
-}
-
-async function approveAll(epicId, btn) {
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span> Approving';
-  await fetch('/approve-all', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ epic_id: epicId })
-  });
-  fetchEpics();
-}
-
-// -- Epics --
-async function fetchEpics() {
-  try {
-    const res = await fetch('/epics');
-    const data = await res.json();
-    const json = JSON.stringify(data.epics || []);
-    if (json !== prevEpicData) {
-      prevEpicData = json;
-      renderEpics(data.epics || []);
-    }
-  } catch (e) {}
-}
-
-function renderEpics(epics) {
-  const section = $('epics-section');
-  const container = $('epics');
-  const summary = $('epics-summary');
-  const epicWord = n => n === 1 ? 'epic' : 'epics';
-
-  if (epics.length === 0) { section.style.display = 'none'; return; }
-  section.style.display = '';
-
-  const withCounts = epics.map(epic => {
-    const proposals = epic.proposals || [];
-    const counts = {
-      pending: proposals.filter(p => p.status === 'pending').length,
-      accepted: proposals.filter(p => p.status === 'approved').length,
-      complete: proposals.filter(p => p.status === 'complete').length,
-      rejected: proposals.filter(p => p.status === 'rejected').length
-    };
-    let lane = 'active';
-    if (counts.pending > 0) lane = 'needs-approval';
-    else if (epic.status === 'complete') lane = 'complete';
-    return { epic, counts, lane };
-  });
-
-  const summaryCounts = {
-    pending: withCounts.filter(x => x.lane === 'needs-approval').length,
-    active: withCounts.filter(x => x.lane === 'active').length,
-    complete: withCounts.filter(x => x.lane === 'complete').length
-  };
-  summary.textContent =
-    summaryCounts.pending + ' ' + epicWord(summaryCounts.pending) + ' need approval · '
-    + summaryCounts.active + ' active · '
-    + summaryCounts.complete + ' complete. Approve only cards in Needs Approval.';
-
-  container.innerHTML = '';
-
-  const lanes = [
-    { key: 'needs-approval', title: 'Needs Approval' },
-    { key: 'active', title: 'Active' },
-    { key: 'complete', title: 'Complete' }
-  ];
-
-  lanes.forEach(lane => {
-    const items = withCounts.filter(x => x.lane === lane.key);
-    if (items.length === 0) return;
-
-    const laneEl = document.createElement('div');
-    laneEl.className = 'epic-lane';
-
-    laneEl.innerHTML = '<div class="epic-lane-head">'
-      + '<div class="epic-lane-title">' + lane.title + '</div>'
-      + '<div class="epic-lane-count">' + items.length + '</div>'
-      + '</div>';
-
-    const body = document.createElement('div');
-
-    items.forEach(({ epic, counts }) => {
-      const proposals = epic.proposals || [];
-      const decisions = proposals.length - counts.pending;
-      const decisionPct = proposals.length > 0 ? (decisions / proposals.length * 100) : 0;
-      const badge = counts.pending > 0
-        ? { cls: 'planning', label: 'needs approval' }
-        : epic.status === 'complete'
-          ? { cls: 'complete', label: 'complete' }
-          : { cls: 'active', label: 'active' };
-
-      let summaryText = '';
-      if (counts.pending > 0) {
-        summaryText = counts.pending + ' proposal' + (counts.pending === 1 ? '' : 's') + ' waiting for approval';
-      } else if (epic.kind === 'existing-issues') {
-        summaryText = counts.accepted + ' accepted · ' + counts.complete + ' complete · ' + counts.rejected + ' rejected';
-      } else {
-        summaryText = counts.accepted + ' accepted · ' + counts.complete + ' complete';
-      }
-
-      const card = document.createElement('div');
-      card.className = 'card epic-card';
-
-      let html = '<div class="epic-top">'
-        + '<div class="epic-title">' + esc(epic.title) + '</div>'
-        + '<span class="badge badge-' + badge.cls + '">' + badge.label + '</span>'
-        + '</div>';
-
-      html += '<div class="epic-meta">' + esc(summaryText) + '</div>';
-
-      if (counts.pending > 0) {
-        html += '<div class="progress-track"><div class="progress-fill" style="width:' + decisionPct + '%"></div></div>'
-          + '<div class="epic-meta">' + decisions + ' / ' + proposals.length + ' decisions made</div>';
-      }
-
-      html += '<div class="epic-counts">'
-        + '<span class="epic-count-chip">' + counts.pending + ' pending</span>'
-        + '<span class="epic-count-chip">' + counts.accepted + ' accepted</span>'
-        + '<span class="epic-count-chip">' + counts.complete + ' complete</span>'
-        + '<span class="epic-count-chip">' + counts.rejected + ' rejected</span>'
-        + '</div>';
-
-      if (epic.claude_notes || epic.gpt_notes) {
-        let notes = '';
-        if (epic.claude_notes) notes += '<strong>Claude:</strong> ' + esc(epic.claude_notes);
-        if (epic.gpt_notes) notes += (notes ? '<br>' : '') + '<strong>GPT-5.4:</strong> ' + esc(epic.gpt_notes);
-        html += '<div class="epic-notes">' + notes + '</div>';
-      }
-
-      if (counts.pending > 0) {
-        html += '<div class="epic-actions">'
-          + '<button class="btn btn-primary btn-sm" onclick="approveAll(\'' + epic.id + '\', this)">Approve all (' + counts.pending + ')</button>'
-          + '</div>';
-      }
-
-      if (epic.feedback && epic.feedback.length > 0) {
-        const comments = epic.feedback.slice(0, 3).map(f => esc(f.comment || '')).filter(Boolean);
-        if (comments.length > 0) {
-          html += '<div class="epic-notes"><strong>Review notes:</strong> ' + comments.join('<br>') + '</div>';
-        }
-      }
-
-      if (epic.dropped_groups && epic.dropped_groups.length > 0) {
-        const dropped = epic.dropped_groups.map(g => {
-          const nums = (g.issue_numbers || []).map(n => '#' + n).join(', ');
-          return esc(g.title) + (nums ? ' (' + esc(nums) + ')' : '');
-        });
-        html += '<div class="epic-notes"><strong>Dropped by GPT review:</strong> ' + dropped.join('<br>') + '</div>';
-      }
-
-      if (epic.ungrouped_issue_numbers && epic.ungrouped_issue_numbers.length > 0) {
-        html += '<div class="epic-notes"><strong>Ungrouped:</strong> '
-          + esc(epic.ungrouped_issue_numbers.map(n => '#' + n).join(', '))
-          + '</div>';
-      }
-
-      html += '<div class="proposals">';
-      proposals.forEach((p, i) => {
-        const srcClass = p.source === 'claude' ? 'proposal-src-claude' : 'proposal-src-gpt';
-        const issueNums = (p.issue_numbers || []).map(n => '#' + n).join(', ');
-        const waves = (p.waves || []).map((wave, idx) => 'W' + (idx + 1) + ': ' + wave.map(n => '#' + n).join(', ')).join('  ');
-        html += '<div class="proposal-row">'
-          + '<div class="proposal-info">'
-          + '<div class="proposal-title">' + esc(p.title) + '</div>'
-          + '<div class="proposal-src ' + srcClass + '">' + esc(p.source) + '</div>'
-          + (issueNums ? '<div class="proposal-meta"><span>' + esc(issueNums) + '</span>' + (waves ? '<span>' + esc(waves) + '</span>' : '') + '</div>' : '')
-          + (p.execution_notes ? '<div class="proposal-body">' + esc(p.execution_notes) + '</div>' : '')
-          + '</div>';
-
-        if (p.status === 'pending') {
-          html += '<div class="proposal-btns">'
-            + '<button class="btn btn-primary btn-sm" onclick="approveIssue(\'' + epic.id + '\',' + i + ')">Approve</button>'
-            + '<button class="btn btn-danger btn-sm" onclick="rejectIssue(\'' + epic.id + '\',' + i + ')">Reject</button>'
-            + '</div>';
-        } else if (p.status === 'approved') {
-          if (p.issue_number) {
-            html += '<span class="proposal-done">accepted · #' + p.issue_number + '</span>';
-          } else if (p.issue_numbers) {
-            const started = p.started_waves || 0;
-            const total = (p.waves || []).length || 0;
-            html += '<span class="proposal-done">active · ' + started + '/' + total + ' waves</span>';
-          } else {
-            html += '<span class="proposal-done">accepted</span>';
-          }
-        } else if (p.status === 'complete') {
-          html += '<span class="proposal-done">complete</span>';
-        } else {
-          html += '<span class="proposal-skip">rejected</span>';
-        }
-
-        html += '</div>';
-      });
-      html += '</div>';
-
-      card.innerHTML = html;
-      body.appendChild(card);
-    });
-
-    laneEl.appendChild(body);
-    container.appendChild(laneEl);
+    body: JSON.stringify(body)
   });
 }
 
@@ -1473,254 +1249,568 @@ function esc(s) {
   return d.innerHTML;
 }
 
-function canManageWorker(worker = {}) {
-  const phase = worker.phase || 'idle';
-  return phase === 'merge_blocked' || phase === 'human_review' || phase === 'ci_failed' || phase === 'awaiting_human_conflict_resolution';
+// ─── Render: Burndown ───
+function renderBurndown(state) {
+  const workers = Object.values(state.workers || {});
+  const queued = (state.queued_issues || []).length;
+  const active = workers.filter(w => w.active).length;
+  const blocked = workers.filter(w => PHASE_CAT[w.phase] === 'blocked').length;
+  const done = parseInt(state.completed || 0);
+  const total = done + active + queued + blocked || 1;
+
+  document.getElementById('bd-done').textContent = done;
+  document.getElementById('bd-active').textContent = active;
+  document.getElementById('bd-queued').textContent = queued;
+  document.getElementById('bd-blocked').textContent = blocked;
+  document.getElementById('bd-fill-done').style.width = (done / total * 100) + '%';
+  document.getElementById('bd-fill-active').style.width = (active / total * 100) + '%';
 }
 
-async function triggerManage(issue, btn) {
-  const issueKey = String(issue.workerKey || issue.number || issue.prNumber || '');
-  if (!issueKey || pendingManageIssues.has(issueKey)) return;
+// ─── Render: Status ───
+function renderStatus(state) {
+  const workers = Object.values(state.workers || {});
+  const activeCount = workers.filter(w => w.active).length;
+  const isPaused = !!(state.pause_kind || state.paused_until);
 
-  pendingManageIssues.add(issueKey);
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = 'Starting...';
+  const chip = document.getElementById('status-chip');
+  const text = document.getElementById('status-text');
+
+  chip.className = 'status-chip';
+  if (isPaused) {
+    text.textContent = 'paused';
+    chip.classList.add('status-paused');
+  } else if (activeCount > 0) {
+    text.textContent = `${activeCount} active`;
+    chip.classList.add('status-active');
+  } else {
+    text.textContent = 'idle';
+    chip.classList.add('status-idle');
   }
 
-  try {
-    const res = await fetch('/manage', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        number: issue.number || null,
-        pr_number: issue.prNumber || null
-      })
-    });
-    const data = await res.json();
-    if (!res.ok || data.error) throw new Error(data.error || ('HTTP ' + res.status));
-  } catch (e) {
-    pendingManageIssues.delete(issueKey);
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = 'Manage';
-    }
-    alert('Manage failed: ' + e.message);
+  if (state.repo) document.getElementById('repo').textContent = state.repo;
+}
+
+// ─── Render: In Flight ───
+function renderInflight(state) {
+  const container = document.getElementById('inflight-list');
+  const workers = state.workers || {};
+  const queued = state.queued_issues || [];
+  const items = [];
+
+  for (const [num, w] of Object.entries(workers)) {
+    if (!w.active) continue;
+    const cat = PHASE_CAT[w.phase] || 'waiting';
+    items.push({ issue: w.issue || num, title: w.title || `Issue #${w.issue || num}`, phase: w.phase, cat, active: true });
   }
-}
+  for (const q of queued) {
+    items.push({ issue: q.number, title: q.title, phase: 'queued', cat: 'waiting', active: false });
+  }
 
-function workerSubjectLabel(num, worker = {}) {
-  if (worker.issue) return 'Issue #' + worker.issue;
-  if (worker.pr_number) return 'PR #' + worker.pr_number;
-  return 'Issue #' + num;
-}
+  document.getElementById('inflight-count').textContent = items.length;
 
-// -- Workers --
-function updateWorkers(workers, state = {}) {
-  const container = $('workers');
-  const entries = Object.entries(workers || {});
-  const activeEntries = entries.filter(([, w]) => w.active);
-  const pill = $('pill');
-  const beacon = $('beacon');
-  const emptyEl = $('workers-empty');
-  const pause = activePause(state);
-
-  if (entries.length === 0) {
-    if (emptyEl) emptyEl.style.display = '';
-    if (pause) {
-      pill.textContent = 'paused';
-      pill.className = 'pill pill-paused';
-      beacon.className = 'beacon paused';
-    } else {
-      pill.textContent = 'idle';
-      pill.className = 'pill pill-idle';
-      beacon.className = 'beacon';
-    }
-    // Remove any leftover worker cards
-    container.querySelectorAll('.card[data-wk]').forEach(c => c.remove());
-    prevWorkerKeys = new Set();
+  if (items.length === 0) {
+    container.innerHTML = '<div class="empty"><strong>Nothing in flight.</strong><br>Plan a feature or assign issues to start.</div>';
     return;
   }
 
-  if (emptyEl) emptyEl.style.display = 'none';
-  if (activeEntries.length > 0) {
-    pill.textContent = activeEntries.length + ' active';
-    pill.className = 'pill pill-active';
-    beacon.className = 'beacon on';
-  } else {
-    pill.textContent = 'recoverable';
-    pill.className = 'pill pill-idle';
-    beacon.className = 'beacon';
+  let html = '';
+  for (const it of items) {
+    const orbClass = it.cat === 'coding' ? 'orb-coding' :
+                     it.cat === 'reviewing' ? 'orb-reviewing' :
+                     it.cat === 'shipping' ? 'orb-shipping' :
+                     it.cat === 'blocked' ? 'orb-blocked' :
+                     it.active ? 'orb-waiting' : 'orb-queued';
+    const tagClass = `phase-tag-${it.cat}`;
+    const label = it.active ? (PHASE_DISPLAY[it.cat] || it.phase) : 'Queued';
+    const detail = PHASE_DETAIL[it.phase] || it.phase;
+
+    html += `
+      <div class="inflight-card" onclick="openLog(${it.issue})">
+        <div class="inflight-orb ${orbClass}"></div>
+        <div class="inflight-body">
+          <div class="inflight-top">
+            <span class="inflight-issue">#${it.issue}</span>
+            <span class="inflight-title">${esc(it.title)}</span>
+          </div>
+          <div class="inflight-meta">
+            <span class="phase-tag ${tagClass}">${label}</span>
+            <span class="inflight-detail">${esc(detail)}</span>
+          </div>
+        </div>
+      </div>`;
+  }
+  container.innerHTML = html;
+}
+
+// ─── Render: Epics ───
+function renderEpics(epics) {
+  const container = document.getElementById('epics-list');
+  document.getElementById('epics-count').textContent = epics.length;
+
+  if (!epics.length) {
+    container.innerHTML = '<div class="empty"><strong>No epics yet.</strong><br>Describe a feature above to create one.</div>';
+    return;
   }
 
-  const currentKeys = new Set(entries.map(([k]) => k));
+  let html = '';
+  for (const epic of epics) {
+    const proposals = epic.proposals || [];
+    const total = proposals.length;
+    const done = proposals.filter(p => p.status === 'complete').length;
+    const rejected = proposals.filter(p => p.status === 'rejected').length;
+    const pct = total > 0 ? Math.round(done / total * 100) : 0;
 
-  // Remove gone workers
-  container.querySelectorAll('.card[data-wk]').forEach(c => {
-    if (!currentKeys.has(c.dataset.wk)) c.remove();
-  });
+    const badgeClass = epic.status === 'complete' ? 'epic-badge-complete' :
+                       epic.status === 'planning' ? 'epic-badge-planning' :
+                       'epic-badge-active';
+    const fillClass = epic.status === 'complete' ? 'epic-fill-complete' : 'epic-fill-active';
 
-  entries.forEach(([num, w]) => {
-    const phase = w.phase || 'idle';
-    if (phase === 'managing' || w.active) pendingManageIssues.delete(String(num));
-    let card = container.querySelector('.card[data-wk="' + num + '"]');
-    const isNew = !card;
-
-    if (isNew) {
-      card = document.createElement('div');
-      card.className = 'card worker-clickable';
-      card.dataset.wk = num;
-      card.setAttribute('data-new', '');
-      container.appendChild(card);
-      // Remove animation attr after it plays
-      card.addEventListener('animationend', () => card.removeAttribute('data-new'), { once: true });
-    }
-    card.onclick = () => openWorkerLog(num, w.title || '');
-
-    // Update contents only if changed
-    const subjectLabel = workerSubjectLabel(num, w);
-    const title = w.title ? subjectLabel + ' ' + w.title : subjectLabel;
-    const branch = w.branch || '';
-    const managing = pendingManageIssues.has(String(num));
-    const key = [
-      phase,
-      title,
-      branch,
-      w.active ? '1' : '0',
-      w.manager_status || '',
-      w.last_error || '',
-      managing ? '1' : '0'
-    ].join('|');
-
-    if (card.dataset.key === key) return;
-    card.dataset.key = key;
-
-    const manageAction = canManageWorker(w)
-      ? '<div class="worker-actions">'
-        + '<button class="btn btn-ghost btn-sm worker-manage-btn" data-manage-issue="' + esc(num) + '"' + (managing ? ' disabled' : '') + '>'
-        + (managing ? 'Starting...' : 'Manage')
-        + '</button>'
-        + '<div class="worker-manage-note">Reconcile this blocked worker</div>'
-        + '</div>'
-      : '';
-
-    card.innerHTML = '<div class="worker-card">'
-      + '<div class="worker-icon worker-icon-' + phase + '">' + (phaseIcon[phase] || '?') + '</div>'
-      + '<div class="worker-body">'
-      + '<div class="worker-phase worker-phase-' + phase + '">' + (phaseLabel[phase] || phase) + '</div>'
-      + '<div class="worker-title">' + esc(title) + '</div>'
-      + (branch ? '<div class="worker-branch">' + esc(branch) + '</div>' : '')
-      + '<div class="worker-meta">'
-      + '<span class="worker-chip">' + (w.active ? 'live' : 'paused') + '</span>'
-      + '<span class="worker-chip">' + esc(subjectLabel) + '</span>'
-      + (w.worktree ? '<span class="worker-chip">' + esc(w.worktree) + '</span>' : '')
-      + '</div>'
-      + '</div>'
-      + manageAction
-      + '</div>';
-
-    const manageBtn = card.querySelector('[data-manage-issue]');
-    if (manageBtn) {
-      manageBtn.addEventListener('click', ev => {
-        ev.stopPropagation();
-        triggerManage({ workerKey: num, number: w.issue || '', prNumber: w.pr_number || '' }, manageBtn);
-      });
-    }
-  });
-
-  prevWorkerKeys = currentKeys;
+    html += `
+      <div class="epic-card">
+        <div class="epic-header">
+          <div class="epic-title">${esc(epic.title || 'Untitled')}</div>
+          <span class="epic-badge ${badgeClass}">${epic.status || 'unknown'}</span>
+        </div>
+        <div class="epic-progress">
+          <div class="epic-progress-track">
+            <div class="epic-progress-fill ${fillClass}" style="width:${pct}%"></div>
+          </div>
+          <div class="epic-progress-text">${done} / ${total} shipped${rejected ? ` · ${rejected} skipped` : ''}</div>
+        </div>
+      </div>`;
+  }
+  container.innerHTML = html;
 }
 
-// -- Timeline --
-function addEvent(ev) {
-  const tl = $('timeline');
-  const empty = $('tl-empty');
-  if (empty) empty.remove();
+// ─── Render: Needs You ───
+function renderNeedsYou(state, epics, triageIssues, featureProposals, activeInterviews) {
+  const container = document.getElementById('needs-you');
+  let count = 0;
+  let lines = [];
 
-  const row = document.createElement('div');
-  row.className = 'ev-row';
-  row.dataset.ts = ev.ts;
+  // Pending epic proposals
+  let proposalCount = 0;
+  for (const e of epics) {
+    for (const p of (e.proposals || [])) {
+      if (p.status === 'pending') proposalCount++;
+    }
+  }
+  if (proposalCount) { count += proposalCount; lines.push(`${proposalCount} proposal${proposalCount > 1 ? 's' : ''} to review`); }
 
-  row.innerHTML = '<div class="ev-dot" style="background:' + (evColor[ev.type] || 'var(--text-tertiary)') + '"></div>'
-    + '<div class="ev-text">' + esc(ev.msg) + '</div>'
-    + '<div class="ev-when">' + ago(ev.ts) + '</div>';
+  // Feature ideas
+  featureProposals = featureProposals || [];
+  if (featureProposals.length) { count += featureProposals.length; lines.push(`${featureProposals.length} feature idea${featureProposals.length > 1 ? 's' : ''}`); }
 
-  tl.insertBefore(row, tl.firstChild);
-  latestEvent = ev;
-  renderRunSummary({
-    workers: currentWorkersCache,
-    queued_issues: currentQueueCache,
-    paused_until_epoch: window.currentPauseUntilEpoch || 0,
-    paused_until: window.currentPauseUntil || '',
-    pause_reason: window.currentPauseReason || '',
-    pause_kind: window.currentPauseKind || ''
-  });
+  // Active interviews
+  activeInterviews = activeInterviews || [];
+  if (activeInterviews.length) { count += activeInterviews.length; lines.push(`${activeInterviews.length} interview${activeInterviews.length > 1 ? 's' : ''} in progress`); }
 
-  // Cap at 80 events
-  while (tl.children.length > 80) tl.removeChild(tl.lastChild);
+  // Untriaged
+  if (triageIssues.length) { count += triageIssues.length; lines.push(`${triageIssues.length} untriaged`); }
+
+  // Blocked
+  const blockedCount = Object.values(state.workers || {}).filter(w => w.active && PHASE_CAT[w.phase] === 'blocked').length;
+  if (blockedCount) { count += blockedCount; lines.push(`${blockedCount} blocked`); }
+
+  // Paused
+  const isPaused = !!(state.pause_kind || state.paused_until);
+  if (isPaused) lines.push(state.pause_reason || 'System paused');
+
+  if (count === 0 && !isPaused) { container.innerHTML = ''; return; }
+
+  container.innerHTML = `
+    <div class="needs-you-banner" onclick="openDrawer()">
+      <div class="needs-you-left">
+        <div class="needs-you-icon">!</div>
+        <div>
+          <div class="needs-you-text">Needs your attention</div>
+          <div class="needs-you-sub">${esc(lines.join(' · '))}</div>
+        </div>
+      </div>
+      <div class="needs-you-count">${isPaused && count === 0 ? '!' : count}</div>
+    </div>`;
 }
 
-// -- Polling --
-async function poll() {
-  try {
-    const stRes = await fetch('/state');
-    const st = await stRes.json();
+// ─── Render: Done ───
+function renderDone(events) {
+  const container = document.getElementById('done-list');
+  const doneEvents = events.filter(e =>
+    e.type === 'pr_merged' || e.type === 'issue_closed' || e.type === 'completed'
+  ).reverse().slice(0, 15);
 
-    if (st.repo) $('repo').textContent = st.repo;
-    currentWorkersCache = st.workers || {};
-    currentQueueCache = st.queued_issues || [];
-    window.currentPauseUntilEpoch = st.paused_until_epoch || 0;
-    window.currentPauseUntil = st.paused_until || '';
-    window.currentPauseReason = st.pause_reason || '';
-    window.currentPauseKind = st.pause_kind || '';
-    updateWorkers(st.workers, st);
-    renderRunSummary(st);
-    $('s-done').textContent = st.completed || '0';
-    $('s-err').textContent = st.errors || '0';
+  document.getElementById('done-count').textContent = doneEvents.length;
 
-    const evRes = await fetch('/events?after=' + evCount);
-    const data = await evRes.json();
-    if (data.events && data.events.length > 0) {
-      if (evCount === 0 && data.events.length > 0) {
-        t0 = new Date(data.events[0].ts).getTime();
+  if (!doneEvents.length) {
+    container.innerHTML = '<div class="empty"><strong>Nothing shipped yet.</strong><br>Completed work will appear here.</div>';
+    return;
+  }
+
+  let html = '';
+  for (const ev of doneEvents) {
+    const m = (ev.msg || '').match(/#(\d+)/);
+    html += `
+      <div class="done-item">
+        <div class="done-check"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 6l3 3 5-5"/></svg></div>
+        <div class="done-title">${esc(ev.msg || 'Completed')}</div>
+        ${m ? `<span class="done-issue">#${m[1]}</span>` : ''}
+      </div>`;
+  }
+  container.innerHTML = html;
+}
+
+// ─── Render: Drawer ───
+function renderDrawer(state, epics, triageIssues, featureProposals, activeInterviews) {
+  const body = document.getElementById('drawer-body');
+  let html = '';
+
+  // Feature request form
+  html += `<div class="drawer-section">
+    <div class="drawer-section-label">New Feature Request</div>
+    <div class="interview-form">
+      <textarea class="interview-input" id="feature-request-input" placeholder="Describe a feature you want built..."></textarea>
+      <button class="btn btn-sm btn-approve" style="margin-top:8px;width:100%" onclick="startInterview()">Interview &amp; Plan</button>
+    </div>
+  </div>`;
+
+  // Active interviews
+  activeInterviews = activeInterviews || [];
+  if (activeInterviews.length) {
+    html += `<div class="drawer-section"><div class="drawer-section-label">Interviews (${activeInterviews.length})</div>`;
+    for (const iv of activeInterviews) {
+      html += `<div class="interview-card" id="interview-${iv.id}">`;
+      html += `<div style="font-size:12px;color:var(--text-lo);margin-bottom:8px">${esc(iv.description.substring(0, 100))}</div>`;
+      for (let qi = 0; qi < (iv.questions || []).length; qi++) {
+        const q = iv.questions[qi];
+        const existingAnswer = (iv.answers || {})[String(qi)] || '';
+        html += `
+          <div style="margin-bottom:10px">
+            <div class="interview-q">${esc(q.question)}</div>
+            <div class="interview-why">${esc(q.why || '')}</div>
+            <textarea class="interview-answer-input" id="iv-${iv.id}-q-${qi}" placeholder="Your answer...">${esc(existingAnswer)}</textarea>
+          </div>`;
       }
-      data.events.forEach(addEvent);
-      evCount = data.total;
+      html += `<div class="feature-actions">
+        <button class="btn btn-sm btn-approve" onclick="submitInterviewAnswers('${iv.id}', ${(iv.questions || []).length})">Submit Answers</button>
+      </div></div>`;
     }
-  } catch (e) {}
+    html += '</div>';
+  }
+
+  // Blocked workers (active or dead — any worker in a blocked phase)
+  const blocked = Object.entries(state.workers || {}).filter(([_, w]) => PHASE_CAT[w.phase] === 'blocked');
+  if (blocked.length) {
+    html += `<div class="drawer-section"><div class="drawer-section-label">Blocked (${blocked.length})</div>`;
+    for (const [num, w] of blocked) {
+      const retries = w.retries || 0;
+      const status = w.active ? 'Auto-fix in progress...' : retries >= 2 ? 'Awaiting auto-triage' : 'Retrying';
+      html += `
+        <div class="proposal-card" style="border-left: 3px solid var(--rose);">
+          <div class="proposal-title">#${w.issue || num}: ${esc(w.title || '')}</div>
+          <div class="proposal-body">${esc(w.last_error || PHASE_DETAIL[w.phase] || w.phase)}</div>
+          <div class="proposal-meta">
+            <span style="color:var(--rose)">${esc(w.phase)}</span>
+            ${retries ? `<span>${retries} retries</span>` : ''}
+            <span>${esc(status)}</span>
+          </div>
+          <div class="proposal-actions">
+            <button class="btn btn-sm btn-approve" onclick="manageIssue(${w.issue || num}, ${w.pr_number || 'null'})">Triage Now</button>
+            <button class="btn btn-sm btn-subtle" onclick="openLog(${w.issue || num}); closeDrawer();">Logs</button>
+          </div>
+        </div>`;
+    }
+    html += '</div>';
+  }
+
+  // Pending epic proposals
+  let pending = [];
+  for (const epic of epics) {
+    for (let i = 0; i < (epic.proposals || []).length; i++) {
+      const p = epic.proposals[i];
+      if (p.status === 'pending') pending.push({ epic, index: i, proposal: p });
+    }
+  }
+  if (pending.length) {
+    html += `<div class="drawer-section"><div class="drawer-section-label">Proposals</div>`;
+    for (const { epic, index, proposal } of pending) {
+      const src = proposal.source || '';
+      const srcClass = src.includes('claude') ? 'proposal-source-claude' : 'proposal-source-gpt';
+      html += `
+        <div class="proposal-card" id="proposal-${epic.id}-${index}">
+          <div class="proposal-title">${esc(proposal.title)}</div>
+          <div class="proposal-body">${esc((proposal.body || '').substring(0, 200))}</div>
+          <div class="proposal-meta">
+            <span class="proposal-source ${srcClass}">${esc(src)}</span>
+            <span>${esc(epic.title || '')}</span>
+          </div>
+          <div class="proposal-actions">
+            <button class="btn btn-sm btn-approve" onclick="approveProposal('${epic.id}', ${index})">Approve</button>
+          </div>
+        </div>`;
+    }
+    const byEpic = {};
+    for (const pp of pending) { byEpic[pp.epic.id] = pp.epic; }
+    for (const [eid, epic] of Object.entries(byEpic)) {
+      html += `<button class="btn btn-approve btn-sm" style="margin-top:6px;width:100%" onclick="approveAll('${eid}')">Approve all from "${esc(epic.title)}"</button>`;
+    }
+    html += '</div>';
+  }
+
+  // Feature ideas from ideation
+  featureProposals = featureProposals || [];
+  if (featureProposals.length) {
+    html += `<div class="drawer-section"><div class="drawer-section-label">Feature Ideas</div>`;
+    for (const proposal of featureProposals) {
+      html += `<div id="feature-proposal-${proposal.id}" style="margin-bottom:12px">`;
+      for (const feature of (proposal.features || [])) {
+        const pClass = (feature.priority || 'medium').toLowerCase();
+        html += `
+          <div class="feature-idea-card">
+            <div class="feature-idea-title">${esc(feature.title || 'Untitled')}</div>
+            <div class="feature-idea-desc">${esc((feature.description || '').substring(0, 200))}</div>
+            <span class="feature-priority-badge ${pClass}">${esc(feature.priority || 'medium')}</span>
+            <div class="feature-idea-toggle" onclick="this.nextElementSibling.classList.toggle('open')">show rationale</div>
+            <div class="feature-rationale">${esc(feature.rationale || '')}</div>
+          </div>`;
+      }
+      html += `<div class="feature-actions">
+        <button class="btn btn-sm btn-approve" onclick="acceptFeatureProposal(${proposal.id})">Create Issues</button>
+        <button class="btn btn-sm btn-subtle" onclick="dismissFeatureProposal(${proposal.id})">Dismiss</button>
+      </div></div>`;
+    }
+    html += '</div>';
+  }
+
+  // Untriaged
+  if (triageIssues.length) {
+    html += `<div class="drawer-section"><div class="drawer-section-label">Untriaged (${triageIssues.length})</div>`;
+    for (const issue of triageIssues) {
+      html += `
+        <div class="triage-item" id="triage-${issue.number}">
+          <span class="triage-num">#${issue.number}</span>
+          <div class="triage-info"><div class="triage-title">${esc(issue.title)}</div></div>
+          <div class="triage-btns">
+            <button class="btn btn-sm btn-approve" onclick="triageAssign(${issue.number})">Assign</button>
+            <button class="btn btn-sm btn-subtle" onclick="triageSkip(${issue.number})">Skip</button>
+          </div>
+        </div>`;
+    }
+    html += '</div>';
+  }
+
+  if (!html) html = '<div class="empty">Nothing needs your attention.</div>';
+  body.innerHTML = html;
 }
 
-function refreshTimes() {
-  $('s-up').textContent = uptime();
-  document.querySelectorAll('.ev-row').forEach(el => {
-    if (el.dataset.ts) {
-      const when = el.querySelector('.ev-when');
-      if (when) when.textContent = ago(el.dataset.ts);
-    }
-  });
+// ─── Actions ───
+async function approveProposal(epicId, idx) {
+  const el = document.querySelector(`#proposal-${epicId}-${idx} .btn-approve`);
+  if (el) { el.disabled = true; el.innerHTML = '<span class="spinner"></span>'; }
+  await postApi('/approve', { epic_id: epicId, index: idx });
+  refresh();
 }
 
-// -- Init --
-setInterval(poll, 1500);
-setInterval(fetchEpics, 5000);
-setInterval(fetchTriage, 10000);
-setInterval(refreshTimes, 5000);
-poll();
-fetchEpics();
-fetchTriage();
+async function approveAll(epicId) {
+  await postApi('/approve-all', { epic_id: epicId });
+  refresh();
+}
 
-$('log-close').addEventListener('click', closeWorkerLog);
-$('log-modal').addEventListener('click', e => {
-  if (e.target === $('log-modal')) closeWorkerLog();
-});
-$('run-active-list').addEventListener('click', e => {
-  const btn = e.target.closest('[data-log-issue]');
-  if (!btn) return;
-  openWorkerLog(btn.dataset.logIssue, btn.dataset.logTitle || '');
-});
-window.addEventListener('keydown', e => {
-  if (e.key === 'Escape') closeWorkerLog();
-});
+async function triageAssign(num) {
+  const el = document.getElementById(`triage-${num}`);
+  if (el) el.style.opacity = '0.3';
+  await postApi('/triage/assign', { number: num });
+  refresh();
+}
+
+async function triageSkip(num) {
+  const el = document.getElementById(`triage-${num}`);
+  if (el) el.style.opacity = '0.3';
+  await postApi('/triage/skip', { number: num });
+  refresh();
+}
+
+async function manageIssue(issue, prNum) {
+  await postApi('/manage', { number: issue, pr_number: prNum });
+  notify('agentify', `Auto-fix triggered for #${issue}`);
+}
+
+async function acceptFeatureProposal(id) {
+  const el = document.querySelector(`#feature-proposal-${id} .btn-approve`);
+  if (el) { el.disabled = true; el.innerHTML = '<span class="spinner"></span> Creating...'; }
+  await postApi('/proposals/accept', { id });
+  refresh();
+}
+
+async function dismissFeatureProposal(id) {
+  const el = document.getElementById(`feature-proposal-${id}`);
+  if (el) el.style.opacity = '0.3';
+  await postApi('/proposals/dismiss', { id });
+  refresh();
+}
+
+async function startInterview() {
+  const input = document.getElementById('feature-request-input');
+  const desc = (input ? input.value : '').trim();
+  if (!desc) return;
+  const btn = input.nextElementSibling;
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Interviewing...'; }
+  await postApi('/interview/start', { description: desc });
+  if (input) input.value = '';
+  refresh();
+}
+
+async function submitInterviewAnswers(id, qCount) {
+  const answers = {};
+  for (let i = 0; i < qCount; i++) {
+    const el = document.getElementById(`iv-${id}-q-${i}`);
+    if (el && el.value.trim()) answers[String(i)] = el.value.trim();
+  }
+  const result = await postApi('/interview/answer', { id, answers });
+  if (result && result.interview && result.interview.status === 'ready_to_plan') {
+    await postApi('/interview/plan', { id });
+  }
+  refresh();
+}
+
+async function submitFeature() {
+  const input = document.getElementById('feature-input');
+  const desc = input.value.trim();
+  if (!desc || planning) return;
+
+  planning = true;
+  const btn = document.getElementById('plan-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Planning';
+
+  try {
+    await postApi('/plan', { description: desc });
+    input.value = '';
+    notify('agentify', 'Feature planned');
+    refresh();
+  } catch(e) { console.error(e); }
+  finally {
+    planning = false;
+    btn.disabled = false;
+    btn.textContent = 'Plan';
+  }
+}
+
+async function groupExisting() {
+  if (grouping) return;
+  grouping = true;
+  const btn = document.getElementById('group-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>';
+
+  try {
+    await postApi('/group-existing');
+    notify('agentify', 'Issues grouped');
+    refresh();
+  } catch(e) { console.error(e); }
+  finally {
+    grouping = false;
+    btn.disabled = false;
+    btn.textContent = 'Group Issues';
+  }
+}
+
+// ─── Drawer ───
+function openDrawer() {
+  document.getElementById('drawer-overlay').classList.add('open');
+  document.getElementById('drawer').classList.add('open');
+}
+function closeDrawer() {
+  document.getElementById('drawer-overlay').classList.remove('open');
+  document.getElementById('drawer').classList.remove('open');
+}
+
+// ─── Log modal ───
+function openLog(issue) {
+  selectedLogIssue = issue;
+  document.getElementById('log-modal').classList.add('open');
+  document.getElementById('log-title').textContent = `Issue #${issue}`;
+  document.getElementById('log-subtitle').textContent = 'Loading...';
+  document.getElementById('log-pre').textContent = 'Fetching logs...';
+  fetchLog();
+  if (logPollTimer) clearInterval(logPollTimer);
+  logPollTimer = setInterval(fetchLog, 3000);
+}
+function closeLog() {
+  document.getElementById('log-modal').classList.remove('open');
+  selectedLogIssue = null;
+  if (logPollTimer) { clearInterval(logPollTimer); logPollTimer = null; }
+}
+
+async function fetchLog() {
+  if (!selectedLogIssue) return;
+  try {
+    const data = await api(`/worker-log?issue=${selectedLogIssue}`);
+    if (data.exists) {
+      document.getElementById('log-subtitle').textContent = `${data.line_count} lines`;
+      document.getElementById('log-pre').textContent = data.content || '(empty)';
+      document.querySelector('.log-body').scrollTop = 999999;
+    } else {
+      document.getElementById('log-subtitle').textContent = 'No log yet';
+      document.getElementById('log-pre').textContent = 'No log available for this issue.';
+    }
+  } catch(e) { document.getElementById('log-pre').textContent = 'Error loading log.'; }
+}
+
+// ─── Refresh loop ───
+async function refresh() {
+  try {
+    const [state, epicData, triageData, eventData, proposalData, interviewData] = await Promise.all([
+      api('/state'),
+      api('/epics'),
+      api('/triage'),
+      api(`/events?after=${evCount}`),
+      api('/proposals'),
+      api('/interviews')
+    ]);
+
+    const epics = epicData.epics || [];
+    const triageIssues = triageData.issues || [];
+    const featureProposals = (proposalData.proposals || []).filter(p => p.status === 'pending');
+    const activeInterviews = (interviewData.interviews || []).filter(iv => iv.status === 'interviewing');
+
+    if (eventData.events && eventData.events.length) {
+      allEvents = allEvents.concat(eventData.events);
+      evCount = eventData.total;
+    }
+
+    renderStatus(state);
+    renderBurndown(state);
+    renderInflight(state);
+    renderEpics(epics);
+    renderNeedsYou(state, epics, triageIssues, featureProposals, activeInterviews);
+    renderDone(allEvents);
+    renderDrawer(state, epics, triageIssues, featureProposals, activeInterviews);
+
+    // Notify on new needs-you items
+    let needsCount = triageIssues.length + featureProposals.length + activeInterviews.length;
+    for (const e of epics) needsCount += (e.proposals || []).filter(p => p.status === 'pending').length;
+    needsCount += Object.values(state.workers || {}).filter(w => w.active && PHASE_CAT[w.phase] === 'blocked').length;
+
+    if (needsCount > lastNeedsYouCount && lastNeedsYouCount >= 0) {
+      notify('agentify', `${needsCount - lastNeedsYouCount} new item(s) need attention`);
+    }
+    lastNeedsYouCount = needsCount;
+  } catch(e) { console.error('Refresh:', e); }
+}
+
+// ─── Init ───
+document.getElementById('plan-btn').addEventListener('click', submitFeature);
+document.getElementById('feature-input').addEventListener('keydown', e => { if (e.key === 'Enter') submitFeature(); });
+document.getElementById('group-btn').addEventListener('click', groupExisting);
+document.getElementById('drawer-overlay').addEventListener('click', closeDrawer);
+document.getElementById('drawer-close').addEventListener('click', closeDrawer);
+document.getElementById('log-close').addEventListener('click', closeLog);
+document.getElementById('log-modal').addEventListener('click', e => { if (e.target === e.currentTarget) closeLog(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeLog(); closeDrawer(); } });
+
+requestNotifications();
+refresh();
+setInterval(refresh, 4000);
 </script>
+
 </body>
 </html>

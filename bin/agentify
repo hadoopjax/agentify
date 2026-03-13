@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")")" && pwd)"
 LIB_DIR="$SCRIPT_DIR/../lib"
 AGENT_ENV_FILE="${AGENTIFY_ENV_FILE:-.agentify/agent.env}"
+
+# Ensure npm global bin is in PATH (for codex, etc.)
+if command -v npm > /dev/null 2>&1; then
+  _npm_bin="$(npm prefix -g 2>/dev/null)/bin"
+  [[ ":$PATH:" == *":$_npm_bin:"* ]] || export PATH="$_npm_bin:$PATH"
+fi
 
 load_env_file() {
   local env_file="$1"
@@ -59,6 +65,7 @@ C_RESET="\033[0m"
 C_DIM="\033[2m"
 C_BOLD="\033[1m"
 C_TEAL="\033[38;5;43m"
+C_YELLOW="\033[38;5;222m"
 
 DASHBOARD_PORT="${DASHBOARD_PORT:-4242}"
 DASHBOARD_PID=""
@@ -91,6 +98,7 @@ Options:
   --pr N               Pull request number/URL for `manage`
   --claude-model M     Claude model (default: claude-opus-4-6)
   --concurrency N      Parallel workers (default: 3)
+  --self-repo OWNER/REPO  Agentify repo for self-healing error reports
   --no-dashboard       Skip the dashboard
 EOF
   exit 1
@@ -117,12 +125,16 @@ require_repo() {
 
 require_tools() {
   local missing=()
-  for cmd in gh codex claude jq node; do
+  for cmd in gh claude jq node; do
     command -v "$cmd" > /dev/null 2>&1 || missing+=("$cmd")
   done
   if [ ${#missing[@]} -gt 0 ]; then
     echo "Missing: ${missing[*]}"
     exit 1
+  fi
+  # Codex is optional at startup — warn but don't block
+  if ! command -v codex > /dev/null 2>&1; then
+    printf "  ${C_DIM}├─${C_RESET} ${C_YELLOW}warning: codex not in PATH — workers will fail until installed${C_RESET}\n"
   fi
 }
 
@@ -155,8 +167,12 @@ ensure_git_identity() {
 
 ensure_codex_auth() {
   if [ -z "${OPENAI_API_KEY:-}" ]; then
-    echo "OpenAI API key is missing. Set OPENAI_API_KEY for the agent environment."
-    exit 1
+    printf "  ${C_DIM}├─${C_RESET} ${C_YELLOW}warning: OPENAI_API_KEY not set — codex workers will fail${C_RESET}\n"
+    return 0
+  fi
+
+  if ! command -v codex > /dev/null 2>&1; then
+    return 0
   fi
 
   if ! printf '%s' "$OPENAI_API_KEY" | codex login --with-api-key > /dev/null 2>&1; then
@@ -230,21 +246,8 @@ cmd_status() {
 }
 
 cmd_dashboard() {
-  if [ ! -d ".agentify" ]; then
-    mkdir -p .agentify
-    echo '{}' > .agentify/state.json
-    touch .agentify/events.jsonl
-  fi
-
-  AGENTIFY_DIR=".agentify" python3 "$LIB_DIR/dashboard.py" "$DASHBOARD_PORT" &
-  DASHBOARD_PID=$!
-
-  if command -v open > /dev/null 2>&1; then
-    sleep 0.3 && open "http://localhost:$DASHBOARD_PORT"
-  fi
-
-  trap cleanup SIGINT SIGTERM
-  wait "$DASHBOARD_PID"
+  # dashboard is just an alias for run — no reason to view without working
+  cmd_run
 }
 
 cmd_run() {
@@ -302,6 +305,7 @@ while [[ $# -gt 0 ]]; do
     --manager-effort) shift; MANAGER_EFFORT="$1"; shift ;;
     --pr)            shift; MANAGE_PR="$1"; shift ;;
     --claude-model)  shift; CLAUDE_MODEL="$1"; shift ;;
+    --self-repo)     shift; AGENTIFY_SELF_REPO="$1"; shift ;;
     --no-dashboard)  NO_DASHBOARD="true"; shift ;;
     -h|--help) usage ;;
     *)
@@ -311,9 +315,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-export MAX_RUNS POLL_INTERVAL MAX_CONCURRENT CODEX_MODEL CODEX_EFFORT MANAGER_MODEL MANAGER_EFFORT CLAUDE_MODEL
+export MAX_RUNS POLL_INTERVAL MAX_CONCURRENT CODEX_MODEL CODEX_EFFORT MANAGER_MODEL MANAGER_EFFORT CLAUDE_MODEL AGENTIFY_SELF_REPO AUTO_GROUP_COOLDOWN_SECONDS AUTO_IDEATION_COOLDOWN_SECONDS
 
-[ -z "$COMMAND" ] && usage
+[ -z "$COMMAND" ] && COMMAND="run"
 
 cmd_plan() {
   require_repo

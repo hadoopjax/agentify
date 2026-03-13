@@ -3,16 +3,18 @@
 Describe a feature. Claude and GPT-5.4 plan the issues. Codex codes them in parallel. Claude reviews and merges. You approve.
 
 ```
-agentify plan "Add OAuth login with Google and GitHub"
-agentify group
-agentify approve <epic-id>
-agentify run
+cd your-repo
+agentify
 ```
+
+That's it. Dashboard opens, workers start, issues get built.
 
 ## How it works
 
 ```
- You describe a feature
+ You describe a feature (dashboard or CLI)
+        ↓
+ Interview agent clarifies requirements
         ↓
  Claude proposes issues ←→ GPT-5.4 critiques
         ↓
@@ -25,37 +27,59 @@ agentify run
  │          (parallel worktrees)            │
  └──────────────────────────────────────────┘
         ↓
- All issues done → epic complete → plan next
+ All issues done → epic complete → ideation proposes next features
 ```
 
 ### Planning
 
-1. `agentify plan "description"` or type it in the dashboard
-2. Claude reads the codebase, proposes issues as structured JSON
-3. GPT-5.4 critiques the plan — flags issues too large, spots gaps, adds suggestions
-4. You approve/reject in the dashboard or via `agentify approve <id>`
-5. Approved issues get the `agent` label
+1. Type a feature description in the dashboard drawer, or `agentify plan "description"`
+2. **Interview agent** asks 3-5 clarifying questions to reduce ambiguity
+3. Once answered, Claude reads the codebase and proposes issues as structured JSON
+4. GPT-5.4 critiques the plan — flags issues too large, spots gaps, adds suggestions
+5. You approve/reject in the dashboard
+6. Approved issues get the `agent` label and enter the queue
+
+### Auto-Ideation
+
+When the system is idle and a `product_brief.md` exists in the repo root:
+
+1. Claude reads the product brief + codebase structure
+2. Proposes 2-5 new features aligned with the product vision
+3. Feature proposals appear in the dashboard's **Needs You** drawer
+4. You can **Create Issues** (turns them into GitHub issues with `agent` label) or **Dismiss**
+5. Won't propose again while pending proposals exist
+6. Cooldown: 30 minutes (configurable via `AUTO_IDEATION_COOLDOWN_SECONDS`)
+
+### Auto-Sequencing
+
+When more than 3 issues are queued, Claude orders them by priority before dispatch:
+
+- Dependencies — issues that unblock others come first
+- Risk — high-risk changes early when there's time to fix
+- Value — higher user-visible impact prioritized
+- Size — smaller issues preferred when priorities are similar
+
+Falls back to GitHub's default ordering if sequencing fails.
 
 ### Triage
 
 Point agentify at a repo with existing issues:
 
-1. `agentify triage` lists open issues that haven't been triaged
-2. Dashboard shows a **Triage** section with all untriaged issues
-3. **Assign** adds the `agent` label — the loop will pick it up
-4. **Skip** adds `agent-skip` — hides it from future triage
-5. Issues already labeled `agent`, `agent-wip`, or `agent-skip` are excluded
+1. Dashboard shows untriaged issues in the **Needs You** drawer
+2. **Assign** adds the `agent` label — the loop picks it up
+3. **Skip** adds `agent-skip` — hides it from future triage
+4. Issues labeled `agent`, `agent-wip`, or `agent-skip` are excluded
 
 ### Group Existing Issues
 
 1. `agentify group` asks Claude to cluster eligible open issues into epic proposals
 2. GPT-5.4 critiques the grouping for overlap, missing groups, and unsafe sequencing
-3. agentify stores the approved-local proposal in `.agentify/epics/*.json`
-4. Existing issues in a grouped proposal are reserved locally so triage will not assign them twice
-5. Approving a grouped epic starts only its first execution wave by labeling those issues `agent`
-6. Later waves unlock automatically after the prior wave closes
-7. Existing-issue epics execute one issue at a time within each epic, so different epics can run in parallel without same-epic merge collisions
-8. Existing-issue grouping is intentionally conservative: only 2-issue groups survive, and if GPT flags a Claude group as unsafe, agentify drops it and returns those issues to the ungrouped pool
+3. Proposals stored in `.agentify/epics/*.json`
+4. Approving a grouped epic starts its first execution wave
+5. Later waves unlock automatically after the prior wave closes
+6. One issue at a time within each epic; different epics run in parallel
+7. Conservative by design: only 2-issue groups survive; if GPT flags a group as unsafe, it gets dropped
+8. Auto-grouping triggers every 10 minutes when idle (configurable via `AUTO_GROUP_COOLDOWN_SECONDS`)
 
 ### Execution
 
@@ -67,34 +91,65 @@ Point agentify at a repo with existing issues:
 6. Claude reviews the diff — LGTM or requests changes
 7. One retry with feedback if changes requested
 8. Merges on approval, cleans up, picks next issue
-9. When all epic issues close, marks epic complete
+9. Epic advancement runs every cycle — detects completed issues, starts next waves
 
-### Failure recovery
+### Failure Recovery & Self-Healing
 
-- `agent-wip` means the issue is actively owned by a live worker, not permanently removed from the queue.
-- If a worker disappears and an issue is left in `agent-wip` without a live worker PID, the loop automatically re-queues it back to `agent` during normal polling. Recovery is not limited to process startup.
-- Quota and billing failures pause new Codex dispatch globally instead of hammering the same issues.
-- The pause window is stored in `.agentify/state.json`, survives restarts, and the dashboard shows the pause reason and retry time.
-- Once the pause expires, any recovered `agent` issues are eligible for dispatch again automatically.
-- Long-running work is governed by an inactivity watchdog, not a "must finish by X minutes" rule.
-- The worker is allowed to keep running as long as its log is advancing or the worktree is changing.
-- A hard absolute ceiling is optional, disabled by default, and intended only as an explicit operator override.
-- High-confidence systemic repo blockers can be captured as deduplicated `agent-blocker` issues.
-- This is intentionally narrow: agentify should create blocker issues for durable repo problems like broken test harnesses, not for ordinary task-local implementation failures.
-- Post-coding orchestration is phase-aware: `pushing`, `pr`, `ci`, `reviewing`, `retrying`, and `merging` survive worker death and restart from durable worker state instead of dropping back to raw coding.
-- If a PR is merge-blocked, agentify leaves it open, records the blocked state, and stops retry churn instead of silently re-queuing the issue.
+**Retry with backoff:**
+- First failure: waits 120 seconds before retrying (exponential backoff based on retry count)
+- Second failure: immediately escalates to the **manager agent** for auto-triage
+- No infinite retry loops, no burning through API rate limits
+
+**Dead worker detection:**
+- Every loop cycle, checks if worker PIDs are actually alive
+- Dead processes get cleaned up, their issues requeued
+- Stale git worktrees pruned automatically at startup and before each worktree create
+
+**Manager agent (auto-triage):**
+- When a worker gets blocked after 2 retries, the manager agent is spawned automatically
+- Manager reads the logs, diagnoses the problem, and attempts a fix
+- No human intervention needed — blocked items show in the dashboard with full context (error, retry count, phase, logs)
+- Also available manually: `agentify manage <issue>` or `agentify manage --pr <pr>`
+
+**Rate limit protection:**
+- Detects GitHub API rate limit errors and pauses all dispatch globally
+- Pause state persists in `.agentify/state.json`, survives restarts
+- Dashboard shows pause reason and estimated resume time
+- Automatically resumes when the rate limit resets
+
+**Self-healing error reports:**
+- When error rate is high (every 25 errors after 10), creates a deduplicated issue in the agentify repo itself
+- Requires `--self-repo OWNER/REPO` flag or `AGENTIFY_SELF_REPO` env var
+- Issues labeled `agent` so the system can fix itself
+
+**Quota handling:**
+- OpenAI quota exhaustion pauses new Codex dispatch globally
+- Long-running work governed by inactivity watchdog, not hard timeouts
+- Worker keeps running as long as its log is advancing or the worktree is changing
+
+## Dashboard
+
+The dashboard is not a separate thing — `agentify` starts both the dashboard and the worker loop. There is no `agentify dashboard` vs `agentify run` distinction; it's all one command.
+
+**Three zones:**
+- **Burndown bar** — shipped / active / queued / blocked counts
+- **In Flight** — live workers with phase indicators (Coding, Reviewing, Shipping, Blocked) + queued issues
+- **Recently Shipped** — completed work
+
+**Needs You drawer** (amber banner → slide-out panel):
+- Feature request form — describe a feature, triggers interview → plan flow
+- Active interviews — answer clarifying questions inline
+- Blocked workers — error details, retry count, logs, auto-triage status
+- Epic proposals — approve/reject planned issues
+- Feature ideas — accept (creates GitHub issues) or dismiss ideation proposals
+- Untriaged issues — assign to agent or skip
+
+**Browser notifications** via Notification API when new items need attention.
 
 ## Setup
 
-### Run locally
-
 ```bash
 git clone https://github.com/hadoopjax/agentify.git
-cd agentify
-npm install
-export PATH="$PATH:$(pwd)/bin"
-
-# Requires: gh, codex, claude, jq, node, python3
 cd your-repo
 
 # Add agent-only keys
@@ -105,21 +160,19 @@ ANTHROPIC_API_KEY=sk-ant-...
 GH_TOKEN=ghp_...
 EOF
 
-agentify init
-agentify run
+agentify init    # creates labels
+agentify         # starts everything
 ```
 
 agentify loads `.agentify/agent.env` only. Keep agent credentials separate from your app's `.env`.
+
+**Requirements:** `gh`, `claude`, `jq`, `node`, `python3`. Codex CLI (`@openai/codex`) must be installed via npm — agentify auto-discovers it from the npm global bin.
 
 ### Run in Docker / Colima
 
 ```bash
 git clone https://github.com/hadoopjax/agentify.git
-cd agentify
-npm install
 cd your-repo
-
-# Add agent-only keys
 mkdir -p .agentify
 cat > .agentify/agent.env <<EOF
 OPENAI_API_KEY=sk-...
@@ -127,18 +180,16 @@ ANTHROPIC_API_KEY=sk-ant-...
 GH_TOKEN=ghp_...
 EOF
 
-# Start (builds image on first run)
 /path/to/agentify/start.sh
 ```
-
-`start.sh` builds the image if needed, reads `.agentify/agent.env`, injects only `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `GH_TOKEN`, and starts the loop with dashboard.
 
 Dashboard at `http://localhost:4242`. With Tailscale, accessible from any device on your tailnet.
 
 ## Commands
 
 ```
-agentify run              Start the loop + dashboard
+agentify                  Start the loop + dashboard (default)
+agentify run              Same as above
 agentify plan "desc"      Plan an epic (Claude + GPT-5.4 dialectic)
 agentify group            Group existing issues into epic proposals
 agentify manage <issue>   Run the manager for a blocked worker
@@ -147,7 +198,6 @@ agentify approve <id>     Approve all pending issues for an epic
 agentify triage           Review existing issues — assign or skip
 agentify init             Create agent/agent-wip/agent-skip labels
 agentify test             Create a test issue
-agentify dashboard        Open just the dashboard
 agentify status           Show state + recent activity
 ```
 
@@ -164,27 +214,19 @@ agentify status           Show state + recent activity
 --manager-effort L   Manager reasoning effort (default: high)
 --pr N               Pull request number/URL for `manage`
 --claude-model M     Claude model (default: claude-opus-4-6)
+--self-repo OWNER/REPO  Agentify repo for self-healing error reports
 --no-dashboard       Skip the dashboard
 ```
 
-## Manager
-
-Use the manager in two modes:
-
-1. `agentify manage <issue>`
-   Re-run management for an existing blocked worker already tracked in `.agentify/workers/`.
-2. `agentify manage --pr <pr>`
-   Adopt an existing dirty PR into manager state even if agentify did not create it originally.
-
-Notes:
-- adopted PR workers are stored locally as `pr-<number>` under `.agentify/workers/`
-- if the PR branch is already checked out in your main repo, agentify creates a temporary local branch like `agentify/manage/...` inside its own worktree so it does not hijack your active checkout
-- pushes still go back to the original remote PR branch
-- manager API calls use a request timeout controlled by `MANAGER_RESPONSE_TIMEOUT_MS` (default: 3 minutes)
-
 ## Per-repo config
 
-Drop `.agentify/agents.md` in your repo with project-specific context:
+**Product brief** — drop `product_brief.md` in the repo root. Used by:
+- Ideation agent (feature proposals)
+- Interview agent (clarifying questions)
+- Sequencing agent (priority ordering)
+- All planning prompts
+
+**Agent context** — drop `.agentify/agents.md` in your repo:
 
 ```markdown
 - We use pnpm, not npm
@@ -195,155 +237,69 @@ Drop `.agentify/agents.md` in your repo with project-specific context:
 
 Both Codex and Claude see this in every prompt.
 
-## Design lineage
-
-This project is not trying to be "a chatbot that writes code." It is trying to turn
-agentic coding into an operational loop with durable state, clear role boundaries,
-and observable execution.
-
-The main design influences show up in concrete ways:
-
-### 1. Karpathy / `autoresearch`: loop + external state + git as the machine
-
-The core Karpathy idea is that the intelligence should not live only in a single
-prompt transcript. It should operate against durable external state and keep going.
-
-How that materializes here:
-
-- `lib/loop.sh` is the long-running supervisor. It keeps polling for work, spawns
-  workers, reaps them, advances epics, and never assumes a single request/response
-  interaction is the whole system.
-- `.agentify/state.json`, `.agentify/events.jsonl`, `.agentify/workers/`, and
-  `.agentify/epics/` are the durable state machine. If the process restarts, the
-  repo still contains the run state.
-- Quota pause state also lives in `.agentify/state.json`, so temporary budget
-  exhaustion becomes a resumable control state rather than a silent failure.
-- `git worktree` usage in `lib/loop.sh` makes git itself part of the execution
-  model: each issue gets an isolated branch and worktree instead of mutating the
-  user's checkout directly.
-- `lib/dashboard.py` and `lib/index.html` expose that state back to humans so the
-  loop is inspectable rather than opaque.
-
-Why we do it this way:
-
-- repos are the durable substrate we already trust
-- state should survive process restarts
-- the agent should be observable as a system, not just as a conversation
-
-### 2. Practical agent factory pattern (the Will Brown-style idea): role separation instead of one omni-agent
-
-The second major idea is that planning, coding, and review should not all be done
-by one undifferentiated agent run. Different steps have different failure modes.
-
-How that materializes here:
-
-- `lib/planner.sh` splits planning into a dialectic:
-  - Claude proposes issue breakdowns or existing-issue groups
-  - GPT-5.4 critiques those proposals before anything is approved
-- `prompts/plan.md` and `prompts/plan-critique.md` make planning and critique
-  separate prompt contracts rather than a single fuzzy planning call.
-- `prompts/group-existing.md` and `prompts/group-existing-critique.md` apply the
-  same pattern to grouping existing issues into safe, execution-ready epics.
-- `prompts/code.md` is only for coding.
-- `prompts/review.md` is only for review.
-- `prompts/retry.md` is only for the bounded "fix the review feedback" retry pass.
-
-Why we do it this way:
-
-- planners are good at decomposition, but bad at self-policing scope
-- coders are good at making local changes, but should not be the final judge of
-  correctness
-- review should happen against an actual diff and PR state, not against intent
-
-### 3. Queue, claim, review, merge: software work as an explicit pipeline
-
-This repo treats issues and PRs as the control surface for the system, not as side
-effects after the fact.
-
-How that materializes here:
-
-- `agent`, `agent-wip`, and `agent-skip` labels are the queue protocol.
-- `agentify triage`, `agentify group`, and `agentify approve` move work into or out
-  of that queue in a controlled way.
-- `lib/loop.sh` claims issues by swapping `agent` to `agent-wip`, then opens PRs,
-  waits for CI, requests review, retries once, and merges.
-- `lib/loop.sh` also reconciles orphaned `agent-wip` issues back into `agent`
-  during normal polling, so queue state self-heals instead of relying on restarts.
-- `check_epic_completion` and `advance_existing_issue_epics` in `lib/planner.sh`
-  turn epic progress into explicit workflow transitions instead of informal notes.
-
-Why we do it this way:
-
-- human and agent work need the same visible state transitions
-- concurrency only works if issue ownership is explicit
-- PRs and CI are the natural governance layer for agent-written code
-
-### 4. Conservative orchestration beats clever orchestration
-
-The system intentionally leaves a lot of work ungrouped or pending instead of trying
-to maximize automation at all costs.
-
-How that materializes here:
-
-- existing-issue grouping in `lib/planner.sh` is intentionally conservative:
-  only simple 2-issue groups survive
-- if GPT critiques a Claude grouping as unsafe, agentify drops it rather than trying
-  to be clever and force it through
-- existing-issue epics execute one wave at a time, and one issue at a time within a
-  wave, even though cross-epic parallelism is allowed
-
-Why we do it this way:
-
-- false-positive grouping is worse than leaving work ungrouped
-- parallelism is valuable only when it does not create hidden merge or schema
-  collisions
-- the product should fail toward legibility and safety, not toward "maximum agentic"
-
-### 5. Live observability is part of the product
-
-The dashboard is not decoration. It is part of the control model.
-
-How that materializes here:
-
-- `lib/dashboard.py` serves live state, events, epics, triage data, and worker log
-  tails
-- `lib/index.html` renders the queue, active workers, grouped epics, latest events,
-  and live per-worker Codex logs
-- `.agentify/logs/*.log` captures actual worker output so you can inspect what a
-  running agent is doing, not just whether it is "active"
-
-Why we do it this way:
-
-- if an agent is writing code unattended, operators need more than a green dot
-- debugging agent systems requires replayable state and readable logs
-- trust comes from being able to inspect the machine while it is running
-
 ## Architecture
 
 ```
 agentify/
 ├── bin/agentify           CLI entry point
 ├── lib/
-│   ├── loop.sh            Dispatcher + parallel workers
-│   ├── planner.sh         Epic planning (Claude + GPT-5.4)
-│   ├── dashboard.py       Threaded HTTP server
-│   └── index.html         Dashboard UI (south beach theme)
+│   ├── loop.sh            Dispatcher + parallel workers + failure recovery
+│   ├── planner.sh         Epic planning, grouping, ideation, sequencing
+│   ├── dashboard.py       Threaded HTTP server (state, epics, proposals, interviews, triage)
+│   └── index.html         Dashboard UI (dark theme, coral→violet gradient)
 ├── prompts/
 │   ├── plan.md            Epic → issues breakdown
 │   ├── plan-critique.md   GPT-5.4 plan review
 │   ├── code.md            Codex coding prompt
 │   ├── review.md          Claude review prompt
-│   └── retry.md           Codex retry with feedback
+│   ├── retry.md           Codex retry with feedback
+│   ├── ideate.md          Feature ideation prompt
+│   ├── interview.md       Feature clarification interview
+│   ├── sequence.md        LLM-driven priority ordering
+│   ├── group-existing.md          Existing issue grouping
+│   └── group-existing-critique.md GPT-5.4 grouping review
 ├── agents.md              Agent playbook
 └── Dockerfile             Container support
 ```
 
-State lives in the repo at `.agentify/`:
-- `state.json` — global counters
+State lives in the target repo at `.agentify/`:
+- `state.json` — global counters, pause state
 - `events.jsonl` — event log (dashboard timeline)
-- `workers/` — per-worker state files
+- `workers/` — per-worker state files (phase, retries, errors, timestamps)
 - `worktrees/` — git worktrees (one per issue)
-- `epics/` — epic plans + proposals
+- `epics/` — epic plans + proposals + wave state
+- `proposals/` — feature ideation proposals
+- `interviews/` — feature interview state
+- `logs/` — per-worker log files
+
+## Role Separation
+
+Different LLMs for different jobs:
+
+| Role | Model | What it does |
+|------|-------|-------------|
+| Planner | Claude | Proposes issue breakdowns, groups existing issues |
+| Critic | GPT-5.4 | Reviews plans for gaps, scope creep, unsafe sequencing |
+| Coder | Codex (gpt-5.4) | Writes code in isolated worktrees |
+| Reviewer | Claude | Reviews PRs against the diff |
+| Manager | GPT-5.4 | Diagnoses and fixes blocked workers |
+| Ideator | Claude | Proposes new features from product brief |
+| Interviewer | Claude | Clarifies vague feature requests |
+| Sequencer | Claude | Orders issues by priority |
+
+## Design Principles
+
+1. **Loop + external state + git as the machine** — Intelligence operates against durable state (`.agentify/`), not just prompt transcripts. Process restarts resume from where they left off.
+
+2. **Role separation over omni-agents** — Planning, coding, review, and triage are separate prompt contracts with different failure modes. Planners decompose; critics police scope; coders implement; reviewers verify.
+
+3. **Issues and PRs as the control surface** — Labels (`agent`, `agent-wip`, `agent-skip`) are the queue protocol. PRs and CI are the governance layer. Human and agent work share the same visible state transitions.
+
+4. **Conservative orchestration** — False-positive grouping is worse than leaving work ungrouped. One issue at a time within epics. Parallelism only when it can't create merge collisions.
+
+5. **Self-healing over manual intervention** — Dead workers detected and requeued. Failed workers escalated to manager after 2 retries. Rate limits pause globally. The system should fix itself; the human approves direction, not babysits execution.
+
+6. **Live observability** — Dashboard shows queue state, active workers, grouped epics, per-worker logs, and needs-attention items. Trust comes from being able to inspect the machine while it runs.
 
 ## Inspired by
 

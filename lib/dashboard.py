@@ -40,6 +40,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._serve_epics()
         elif self.path == "/triage":
             self._serve_triage()
+        elif self.path == "/proposals":
+            self._serve_proposals()
+        elif self.path == "/interviews":
+            self._serve_interviews()
         else:
             self.send_error(404)
 
@@ -63,6 +67,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._handle_triage_assign(body)
         elif self.path == "/triage/skip":
             self._handle_triage_skip(body)
+        elif self.path == "/proposals/accept":
+            self._handle_proposal_accept(body)
+        elif self.path == "/proposals/dismiss":
+            self._handle_proposal_dismiss(body)
+        elif self.path == "/interview/start":
+            self._handle_interview_start(body)
+        elif self.path == "/interview/answer":
+            self._handle_interview_answer(body)
+        elif self.path == "/interview/plan":
+            self._handle_interview_plan(body)
         else:
             self.send_error(404)
 
@@ -153,6 +167,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         pass
         self._json_response({"epics": epics})
 
+    def _serve_proposals(self):
+        proposals = []
+        proposals_dir = os.path.join(DATA_DIR, "proposals")
+        if os.path.isdir(proposals_dir):
+            for fname in sorted(os.listdir(proposals_dir)):
+                if fname.endswith(".json"):
+                    try:
+                        with open(os.path.join(proposals_dir, fname)) as f:
+                            proposals.append(json.load(f))
+                    except (json.JSONDecodeError, FileNotFoundError):
+                        pass
+        self._json_response({"proposals": proposals})
+
     def _serve_worker_log(self):
         issue = None
         if "?" in self.path:
@@ -205,6 +232,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if proposal.get("status") in {"rejected", "complete"}:
                     continue
                 for num in proposal.get("issue_numbers", []):
+                    if isinstance(num, bool):
+                        continue
+                    if isinstance(num, str) and num.isdigit():
+                        reserved.add(int(num))
+                        continue
                     if isinstance(num, int):
                         reserved.add(num)
 
@@ -538,6 +570,222 @@ echo "$epic_id"
         except Exception as e:
             self._json_response({"error": str(e)}, 500)
 
+    def _handle_proposal_accept(self, body):
+        proposal_id = body.get("id")
+        if not proposal_id:
+            self._json_response({"error": "No proposal id"}, 400)
+            return
+        proposal_file = os.path.join(DATA_DIR, "proposals", f"{proposal_id}.json")
+        if not os.path.exists(proposal_file):
+            self._json_response({"error": "Proposal not found"}, 404)
+            return
+        try:
+            with open(proposal_file) as f:
+                proposal = json.load(f)
+            if proposal.get("status") != "pending":
+                self._json_response({"error": f"Already {proposal.get('status')}"}, 400)
+                return
+            created = []
+            for feature in proposal.get("features", []):
+                title = feature.get("title", "Untitled feature")
+                desc = feature.get("description", "")
+                rationale = feature.get("rationale", "")
+                priority = feature.get("priority", "medium")
+                fb = f"{desc}\n\n**Rationale:** {rationale}\n**Priority:** {priority}\n\n---\n*Proposed by agentify ideation*"
+                result = subprocess.run(
+                    ["gh", "issue", "create", "--title", title, "--body", fb, "--label", "agent"],
+                    capture_output=True, text=True, timeout=30
+                )
+                if result.returncode == 0:
+                    url = result.stdout.strip()
+                    num = int(url.rstrip("/").split("/")[-1])
+                    created.append({"title": title, "number": num, "url": url})
+            proposal["status"] = "accepted"
+            proposal["created_issues"] = created
+            with open(proposal_file, "w") as f:
+                json.dump(proposal, f)
+            self._json_response({"ok": True, "created": created})
+        except Exception as e:
+            self._json_response({"error": str(e)}, 500)
+
+    def _handle_proposal_dismiss(self, body):
+        proposal_id = body.get("id")
+        if not proposal_id:
+            self._json_response({"error": "No proposal id"}, 400)
+            return
+        proposal_file = os.path.join(DATA_DIR, "proposals", f"{proposal_id}.json")
+        if not os.path.exists(proposal_file):
+            self._json_response({"error": "Proposal not found"}, 404)
+            return
+        try:
+            with open(proposal_file) as f:
+                proposal = json.load(f)
+            proposal["status"] = "dismissed"
+            with open(proposal_file, "w") as f:
+                json.dump(proposal, f)
+            self._json_response({"ok": True})
+        except Exception as e:
+            self._json_response({"error": str(e)}, 500)
+
+    def _serve_interviews(self):
+        interviews = []
+        interviews_dir = os.path.join(DATA_DIR, "interviews")
+        if os.path.isdir(interviews_dir):
+            for fname in sorted(os.listdir(interviews_dir)):
+                if fname.endswith(".json"):
+                    try:
+                        with open(os.path.join(interviews_dir, fname)) as f:
+                            interviews.append(json.load(f))
+                    except (json.JSONDecodeError, FileNotFoundError):
+                        pass
+        self._json_response({"interviews": interviews})
+
+    def _extract_json(self, text):
+        """Extract first JSON object from text."""
+        start = text.find("{")
+        if start == -1:
+            return None
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start:i + 1])
+                    except json.JSONDecodeError:
+                        return None
+        return None
+
+    def _handle_interview_start(self, body):
+        description = body.get("description", "")
+        if not description:
+            self._json_response({"error": "No description"}, 400)
+            return
+        try:
+            prompt_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "prompts", "interview.md")
+            if not os.path.exists(prompt_file):
+                self._json_response({"error": "Interview prompt not found"}, 500)
+                return
+            with open(prompt_file) as f:
+                template = f.read()
+            repo_ctx = ""
+            if os.path.exists("product_brief.md"):
+                with open("product_brief.md") as f:
+                    repo_ctx = f.read()
+            prompt = template.replace("{{FEATURE_REQUEST}}", description)
+            prompt = prompt.replace("{{REPO_CONTEXT}}", repo_ctx)
+            claude_model = os.environ.get("CLAUDE_MODEL", "claude-opus-4-6")
+            result = subprocess.run(
+                ["claude", "-p", "--model", claude_model, prompt],
+                capture_output=True, text=True, timeout=120
+            )
+            if result.returncode != 0:
+                self._json_response({"error": "Claude call failed", "stderr": result.stderr}, 500)
+                return
+            parsed = self._extract_json(result.stdout)
+            if not parsed:
+                self._json_response({"error": "Failed to parse interview response"}, 500)
+                return
+            interviews_dir = os.path.join(DATA_DIR, "interviews")
+            os.makedirs(interviews_dir, exist_ok=True)
+            import time
+            interview_id = str(int(time.time()))
+            interview = {
+                "id": interview_id,
+                "description": description,
+                "status": "interviewing",
+                "questions": parsed.get("questions", []),
+                "initial_understanding": parsed.get("initial_understanding", ""),
+                "answers": {},
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            with open(os.path.join(interviews_dir, f"{interview_id}.json"), "w") as f:
+                json.dump(interview, f)
+            self._json_response({"interview": interview})
+        except subprocess.TimeoutExpired:
+            self._json_response({"error": "Interview timed out"}, 504)
+        except Exception as e:
+            self._json_response({"error": str(e)}, 500)
+
+    def _handle_interview_answer(self, body):
+        interview_id = body.get("id", "")
+        answers = body.get("answers", {})
+        if not interview_id:
+            self._json_response({"error": "No interview id"}, 400)
+            return
+        interview_file = os.path.join(DATA_DIR, "interviews", f"{interview_id}.json")
+        if not os.path.exists(interview_file):
+            self._json_response({"error": "Interview not found"}, 404)
+            return
+        try:
+            with open(interview_file) as f:
+                interview = json.load(f)
+            interview["answers"].update(answers)
+            total_q = len(interview.get("questions", []))
+            answered = len(interview["answers"])
+            if answered >= total_q:
+                interview["status"] = "ready_to_plan"
+            with open(interview_file, "w") as f:
+                json.dump(interview, f)
+            self._json_response({"interview": interview})
+        except Exception as e:
+            self._json_response({"error": str(e)}, 500)
+
+    def _handle_interview_plan(self, body):
+        interview_id = body.get("id", "")
+        if not interview_id:
+            self._json_response({"error": "No interview id"}, 400)
+            return
+        interview_file = os.path.join(DATA_DIR, "interviews", f"{interview_id}.json")
+        if not os.path.exists(interview_file):
+            self._json_response({"error": "Interview not found"}, 404)
+            return
+        try:
+            with open(interview_file) as f:
+                interview = json.load(f)
+            if interview.get("status") != "ready_to_plan":
+                self._json_response({"error": f"Interview status is {interview.get('status')}, not ready_to_plan"}, 400)
+                return
+            # Build enriched description from Q&A
+            parts = [interview["description"], "", "## Clarifications", ""]
+            for i, q in enumerate(interview.get("questions", [])):
+                answer = interview["answers"].get(str(i), "")
+                parts.append(f"**Q:** {q.get('question', '')}")
+                parts.append(f"**A:** {answer}")
+                parts.append("")
+            enriched = "\n".join(parts)
+            script = f"""
+source "{os.path.join(os.path.dirname(os.path.abspath(__file__)), 'loop.sh')}"
+source "{os.path.join(os.path.dirname(os.path.abspath(__file__)), 'planner.sh')}"
+AGENTIFY_DIR="{DATA_DIR}"
+EVENTS_FILE="{DATA_DIR}/events.jsonl"
+STATE_FILE="{DATA_DIR}/state.json"
+epic_id=$(plan_epic {json.dumps(enriched)})
+echo "$epic_id"
+"""
+            result = subprocess.run(
+                ["bash", "-c", script],
+                capture_output=True, text=True, timeout=180,
+                env={**os.environ, "AGENTIFY_DIR": DATA_DIR}
+            )
+            epic_id = result.stdout.strip().split("\n")[-1]
+            interview["status"] = "planned"
+            interview["epic_id"] = epic_id
+            with open(interview_file, "w") as f:
+                json.dump(interview, f)
+            epic_file = os.path.join(DATA_DIR, "epics", f"{epic_id}.json")
+            epic = None
+            if os.path.exists(epic_file):
+                with open(epic_file) as f:
+                    epic = json.load(f)
+            self._json_response({"interview": interview, "epic": epic})
+        except subprocess.TimeoutExpired:
+            self._json_response({"error": "Planning timed out"}, 504)
+        except Exception as e:
+            self._json_response({"error": str(e)}, 500)
+
     def _json_response(self, data, status=200):
         body = json.dumps(data).encode()
         self.send_response(status)
@@ -561,6 +809,7 @@ echo "$epic_id"
 
 class ThreadedServer(ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
+    allow_reuse_address = True
 
 
 if __name__ == "__main__":
