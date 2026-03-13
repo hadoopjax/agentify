@@ -1,7 +1,25 @@
 #!/usr/bin/env bash
 # agentify planner — epic breakdown via Claude + GPT-5.4 dialectic
 
-EPICS_DIR="$AGENTIFY_DIR/epics"
+epic_list_json() {
+  control_plane epic-list | jq -c '.epics // []'
+}
+
+epic_get_json() {
+  control_plane epic-get "$1"
+}
+
+save_epic_json() {
+  control_plane epic-save "$1" > /dev/null
+}
+
+proposal_list_json() {
+  control_plane proposal-list | jq -c '.proposals // []'
+}
+
+save_proposal_json() {
+  control_plane proposal-save "$1" > /dev/null
+}
 
 # Call GPT-5.4 via API (no codex, pure planning — no filesystem side effects)
 call_gpt() {
@@ -75,17 +93,12 @@ raise SystemExit(1)
 }
 
 reserved_existing_issue_numbers() {
-  [ -d "$EPICS_DIR" ] || return 0
-
-  for epic_file in "$EPICS_DIR"/*.json; do
-    [ -f "$epic_file" ] || continue
-    jq -r '
+  epic_list_json | jq -r '
       select((.kind // "") == "existing-issues") |
       .proposals[]? |
       select((.status // "") != "rejected" and (.status // "") != "complete") |
       .issue_numbers[]?
-    ' "$epic_file" 2>/dev/null
-  done | awk '!seen[$0]++'
+    ' 2>/dev/null | awk '!seen[$0]++'
 }
 
 existing_group_candidates() {
@@ -296,7 +309,6 @@ PY
 plan_epic() {
   local description="$1"
   local epic_id=$(date +%s)
-  mkdir -p "$EPICS_DIR"
 
   log "${C_TEAL}Planning epic: $description"
   emit "plan_start" "Planning: $description"
@@ -356,6 +368,9 @@ plan_epic() {
     title: .title,
     body: .body,
     priority: .priority,
+    validation_commands: (.validation_commands // []),
+    required_checks: (.required_checks // []),
+    files_of_interest: (.files_of_interest // []),
     status: "pending",
     source: "claude",
     issue_number: null
@@ -367,6 +382,9 @@ plan_epic() {
     title: .title,
     body: .body,
     priority: .priority,
+    validation_commands: (.validation_commands // []),
+    required_checks: (.required_checks // []),
+    files_of_interest: (.files_of_interest // []),
     status: "pending",
     source: "gpt-5.4",
     issue_number: null
@@ -379,8 +397,8 @@ plan_epic() {
   feedback=$(echo "$gpt_critique" | jq -c '.feedback // []')
 
   # Build the epic file
-  local epic_file="$EPICS_DIR/$epic_id.json"
-  jq -nc \
+  local epic_payload
+  epic_payload=$(jq -nc \
     --arg id "$epic_id" \
     --arg title "$description" \
     --arg status "planning" \
@@ -398,7 +416,8 @@ plan_epic() {
       feedback: $feedback,
       claude_notes: $claude_notes,
       gpt_notes: $gpt_notes
-    }' > "$epic_file"
+    }')
+  save_epic_json "$epic_payload"
 
   local total=$(echo "$proposals" | jq 'length')
   log "${C_GREEN}Epic planned: $total proposed issues"
@@ -426,7 +445,6 @@ plan_epic() {
 group_existing_issues() {
   local epic_id
   epic_id=$(date +%s)
-  mkdir -p "$EPICS_DIR"
 
   local issues_json
   issues_json=$(existing_group_candidates)
@@ -485,8 +503,8 @@ group_existing_issues() {
   local normalized
   normalized=$(normalize_existing_group_plan "$issues_json" "$claude_groups" "$gpt_critique")
 
-  local epic_file="$EPICS_DIR/$epic_id.json"
-  jq -nc \
+  local epic_payload
+  epic_payload=$(jq -nc \
     --arg id "$epic_id" \
     --arg title "Existing issue grouping $(date +%Y-%m-%d)" \
     --arg kind "existing-issues" \
@@ -510,7 +528,8 @@ group_existing_issues() {
       ungrouped_issue_numbers: $ungrouped,
       claude_notes: $claude_notes,
       gpt_notes: $gpt_notes
-    }' > "$epic_file"
+    }')
+  save_epic_json "$epic_payload"
 
   local total
   total=$(echo "$normalized" | jq '.proposals | length')
@@ -535,144 +554,54 @@ group_existing_issues() {
 }
 
 approve_issue() {
-  local epic_id="$1" index="$2"
-  local epic_file="$EPICS_DIR/$epic_id.json"
-
-  [ ! -f "$epic_file" ] && { echo "Epic not found: $epic_id"; return 1; }
-
-  local proposal
-  proposal=$(jq -c ".proposals[$index]" "$epic_file")
-  [ "$proposal" = "null" ] && { echo "Issue index $index not found"; return 1; }
-
-  local status=$(echo "$proposal" | jq -r '.status')
-  [ "$status" != "pending" ] && { echo "Issue already $status"; return 1; }
-
-  local epic_kind
-  epic_kind=$(jq -r '.kind // "planned-issues"' "$epic_file")
-
-  if [ "$epic_kind" = "existing-issues" ]; then
-    local title wave_numbers
-    title=$(echo "$proposal" | jq -r '.title')
-    wave_numbers=$(echo "$proposal" | jq -r '.waves[0][]?')
-    [ -n "$wave_numbers" ] || { echo "Proposal has no execution wave"; return 1; }
-
-    for num in $wave_numbers; do
-      gh issue edit "$num" --add-label "agent" 2>/dev/null
-    done
-
-    local tmp=$(mktemp)
-    jq --argjson i "$index" '
-      .proposals[$i].status = "approved" |
-      .proposals[$i].started_waves = 1 |
-      .status = "active"
-    ' "$epic_file" > "$tmp" && mv "$tmp" "$epic_file"
-
-    log "${C_GREEN}Approved existing issue group: $title"
-    emit "group_approved" "Approved existing issue group: $title"
-    return 0
-  fi
-
-  local title=$(echo "$proposal" | jq -r '.title')
-  local body=$(echo "$proposal" | jq -r '.body')
-
-  local issue_url
-  issue_url=$(gh issue create \
-    --title "$title" \
-    --body "$body
-
----
-*Part of epic: $(jq -r '.title' "$epic_file")*" \
-    --label "agent")
-
-  local issue_num=$(echo "$issue_url" | grep -oE '[0-9]+$')
-
-  local tmp=$(mktemp)
-  jq --argjson i "$index" --arg num "$issue_num" \
-    '.proposals[$i].status = "approved" | .proposals[$i].issue_number = ($num | tonumber)' \
-    "$epic_file" > "$tmp" && mv "$tmp" "$epic_file"
-
-  # Check if all pending are resolved — if so, mark epic active
-  local pending=$(jq '[.proposals[] | select(.status == "pending")] | length' "$epic_file")
-  if [ "$pending" -eq 0 ]; then
-    local tmp2=$(mktemp)
-    jq '.status = "active"' "$epic_file" > "$tmp2" && mv "$tmp2" "$epic_file"
-  fi
-
-  log "${C_GREEN}Approved: #$issue_num $title"
-  emit "issue_approved" "Approved #$issue_num: $title (epic: $epic_id)"
+  control_plane approve-epic --repo "$(pwd)" "$1" "$2" > /dev/null
 }
 
 reject_issue() {
-  local epic_id="$1" index="$2"
-  local epic_file="$EPICS_DIR/$epic_id.json"
-
-  [ ! -f "$epic_file" ] && return 1
-
-  local tmp=$(mktemp)
-  jq --argjson i "$index" '.proposals[$i].status = "rejected"' \
-    "$epic_file" > "$tmp" && mv "$tmp" "$epic_file"
-
-  # Check if all pending are resolved
-  local pending=$(jq '[.proposals[] | select(.status == "pending")] | length' "$epic_file")
-  if [ "$pending" -eq 0 ]; then
-    local tmp2=$(mktemp)
-    jq '.status = "active"' "$epic_file" > "$tmp2" && mv "$tmp2" "$epic_file"
-  fi
+  control_plane reject-epic "$1" "$2" > /dev/null
 }
 
 approve_all() {
-  local epic_id="$1"
-  local epic_file="$EPICS_DIR/$epic_id.json"
-
-  [ ! -f "$epic_file" ] && { echo "Epic not found: $epic_id"; return 1; }
-
-  local count=$(jq '[.proposals[] | select(.status == "pending")] | length' "$epic_file")
-
-  for ((i=0; i<$(jq '.proposals | length' "$epic_file"); i++)); do
-    local status=$(jq -r ".proposals[$i].status" "$epic_file")
-    [ "$status" = "pending" ] && approve_issue "$epic_id" "$i"
-  done
-
-  log "${C_GREEN}All $count issues approved and created"
+  control_plane approve-all --repo "$(pwd)" "$1" > /dev/null
+  log "${C_GREEN}All pending issues approved and created"
 }
 
 advance_existing_issue_epics() {
-  for epic_file in "$EPICS_DIR"/*.json; do
-    [ -f "$epic_file" ] || continue
-
-    # Skip corrupt/empty epic files
-    jq empty "$epic_file" 2>/dev/null || continue
+  local epics_json
+  epics_json=$(epic_list_json)
+  for epic_id in $(echo "$epics_json" | jq -r '.[]?.id'); do
+    local epic_json
+    epic_json=$(echo "$epics_json" | jq -c --arg id "$epic_id" '.[] | select(.id == $id)')
 
     local epic_kind
-    epic_kind=$(jq -r '.kind // ""' "$epic_file")
+    epic_kind=$(echo "$epic_json" | jq -r '.kind // ""')
     [ "$epic_kind" = "existing-issues" ] || continue
 
     local changed=0
     local proposals_len
-    proposals_len=$(jq '.proposals | length' "$epic_file")
+    proposals_len=$(echo "$epic_json" | jq '.proposals | length')
 
     for ((i=0; i<proposals_len; i++)); do
       local proposal_status
-      proposal_status=$(jq -r ".proposals[$i].status" "$epic_file")
+      proposal_status=$(echo "$epic_json" | jq -r ".proposals[$i].status")
       [ "$proposal_status" = "approved" ] || continue
 
       local started total_waves
-      started=$(jq -r ".proposals[$i].started_waves // 0" "$epic_file")
-      total_waves=$(jq -r ".proposals[$i].waves | length" "$epic_file")
+      started=$(echo "$epic_json" | jq -r ".proposals[$i].started_waves // 0")
+      total_waves=$(echo "$epic_json" | jq -r ".proposals[$i].waves | length")
 
       # Fix: if approved but started_waves is 0, kick off the first wave
       if [ "$started" -eq 0 ] && [ "$total_waves" -gt 0 ]; then
         local first_wave_numbers
-        first_wave_numbers=$(jq -r ".proposals[$i].waves[0][]?" "$epic_file")
+        first_wave_numbers=$(echo "$epic_json" | jq -r ".proposals[$i].waves[0][]?")
         for num in $first_wave_numbers; do
           gh issue edit "$num" --add-label "agent" > /dev/null 2>&1
         done
-        local tmp=$(mktemp)
-        jq --argjson i "$i" '.proposals[$i].started_waves = 1' "$epic_file" > "$tmp" && mv "$tmp" "$epic_file"
+        epic_json=$(echo "$epic_json" | jq --argjson i "$i" '.proposals[$i].started_waves = 1')
         started=1
         changed=1
         local title
-        title=$(jq -r ".proposals[$i].title" "$epic_file")
+        title=$(echo "$epic_json" | jq -r ".proposals[$i].title")
         emit "group_wave_started" "Recovered stalled proposal — started first wave: $title"
       fi
 
@@ -680,7 +609,7 @@ advance_existing_issue_epics() {
 
       local current_wave_done=true
       local current_wave_numbers
-      current_wave_numbers=$(jq -r ".proposals[$i].waves[$((started - 1))][]?" "$epic_file")
+      current_wave_numbers=$(echo "$epic_json" | jq -r ".proposals[$i].waves[$((started - 1))][]?")
 
       for num in $current_wave_numbers; do
         local state
@@ -695,24 +624,23 @@ advance_existing_issue_epics() {
 
       if [ "$started" -lt "$total_waves" ]; then
         local next_wave_numbers
-        next_wave_numbers=$(jq -r ".proposals[$i].waves[$started][]?" "$epic_file")
+        next_wave_numbers=$(echo "$epic_json" | jq -r ".proposals[$i].waves[$started][]?")
         for num in $next_wave_numbers; do
           gh issue edit "$num" --add-label "agent" > /dev/null 2>&1
         done
 
-        local tmp=$(mktemp)
-        jq --argjson i "$i" '
+        epic_json=$(echo "$epic_json" | jq --argjson i "$i" '
           .proposals[$i].started_waves = ((.proposals[$i].started_waves // 0) + 1)
-        ' "$epic_file" > "$tmp" && mv "$tmp" "$epic_file"
+        ')
         changed=1
 
         local title
-        title=$(jq -r ".proposals[$i].title" "$epic_file")
+        title=$(echo "$epic_json" | jq -r ".proposals[$i].title")
         emit "group_wave_started" "Started next wave for existing issue group: $title"
       else
         local all_closed=true
         local issue_nums
-        issue_nums=$(jq -r ".proposals[$i].issue_numbers[]?" "$epic_file")
+        issue_nums=$(echo "$epic_json" | jq -r ".proposals[$i].issue_numbers[]?")
         for num in $issue_nums; do
           local state
           state=$(gh issue view "$num" --json state -q '.state' 2>/dev/null)
@@ -723,12 +651,11 @@ advance_existing_issue_epics() {
         done
 
         if [ "$all_closed" = true ]; then
-          local tmp=$(mktemp)
-          jq --argjson i "$i" '.proposals[$i].status = "complete"' "$epic_file" > "$tmp" && mv "$tmp" "$epic_file"
+          epic_json=$(echo "$epic_json" | jq --argjson i "$i" '.proposals[$i].status = "complete"')
           changed=1
 
           local title
-          title=$(jq -r ".proposals[$i].title" "$epic_file")
+          title=$(echo "$epic_json" | jq -r ".proposals[$i].title")
           emit "group_complete" "Existing issue group complete: $title"
         fi
       fi
@@ -736,18 +663,16 @@ advance_existing_issue_epics() {
 
     if [ "$changed" -eq 1 ]; then
       local pending approved complete
-      pending=$(jq '[.proposals[] | select(.status == "pending")] | length' "$epic_file")
-      approved=$(jq '[.proposals[] | select(.status == "approved")] | length' "$epic_file")
-      complete=$(jq '[.proposals[] | select(.status == "complete")] | length' "$epic_file")
+      pending=$(echo "$epic_json" | jq '[.proposals[] | select(.status == "pending")] | length')
+      approved=$(echo "$epic_json" | jq '[.proposals[] | select(.status == "approved")] | length')
+      complete=$(echo "$epic_json" | jq '[.proposals[] | select(.status == "complete")] | length')
 
-      local tmp=$(mktemp)
       if [ "$pending" -eq 0 ] && [ "$approved" -eq 0 ] && [ "$complete" -gt 0 ]; then
-        jq '.status = "complete"' "$epic_file" > "$tmp" && mv "$tmp" "$epic_file"
+        epic_json=$(echo "$epic_json" | jq '.status = "complete"')
       elif [ "$approved" -gt 0 ] || [ "$complete" -gt 0 ]; then
-        jq '.status = "active"' "$epic_file" > "$tmp" && mv "$tmp" "$epic_file"
-      else
-        rm -f "$tmp"
+        epic_json=$(echo "$epic_json" | jq '.status = "active"')
       fi
+      save_epic_json "$epic_json"
     fi
   done
 
@@ -757,19 +682,23 @@ advance_existing_issue_epics() {
 check_epic_completion() {
   advance_existing_issue_epics
 
-  for epic_file in "$EPICS_DIR"/*.json; do
-    [ -f "$epic_file" ] || continue
-
-    local status=$(jq -r '.status' "$epic_file")
+  local epics_json
+  epics_json=$(epic_list_json)
+  for epic_id in $(echo "$epics_json" | jq -r '.[]?.id'); do
+    local epic_json
+    epic_json=$(echo "$epics_json" | jq -c --arg id "$epic_id" '.[] | select(.id == $id)')
+    local status
+    status=$(echo "$epic_json" | jq -r '.status')
     [ "$status" != "active" ] && continue
 
     local epic_kind
-    epic_kind=$(jq -r '.kind // "planned-issues"' "$epic_file")
+    epic_kind=$(echo "$epic_json" | jq -r '.kind // "planned-issues"')
     [ "$epic_kind" = "existing-issues" ] && continue
 
     # Check if all approved issues are closed
     local all_done=true
-    local issue_nums=$(jq -r '.proposals[] | select(.status == "approved") | .issue_number // empty' "$epic_file")
+    local issue_nums
+    issue_nums=$(echo "$epic_json" | jq -r '.proposals[] | select(.status == "approved") | .issue_number // empty')
 
     for num in $issue_nums; do
       local state=$(gh issue view "$num" --json state -q '.state' 2>/dev/null)
@@ -780,12 +709,12 @@ check_epic_completion() {
     done
 
     if [ "$all_done" = true ] && [ -n "$issue_nums" ]; then
-      local title=$(jq -r '.title' "$epic_file")
+      local title
+      title=$(echo "$epic_json" | jq -r '.title')
       log "${C_GREEN}Epic complete: $title"
       emit "epic_complete" "Epic complete: $title"
-
-      local tmp=$(mktemp)
-      jq '.status = "complete"' "$epic_file" > "$tmp" && mv "$tmp" "$epic_file"
+      epic_json=$(echo "$epic_json" | jq '.status = "complete"')
+      save_epic_json "$epic_json"
     fi
   done
 
@@ -841,14 +770,10 @@ propose_features() {
   local feature_count
   feature_count=$(echo "$features" | jq 'length' 2>/dev/null || echo 0)
 
-  local proposals_dir="$AGENTIFY_DIR/proposals"
-  mkdir -p "$proposals_dir"
-
   local proposal_id
   proposal_id=$(date +%s)
-  local proposal_file="$proposals_dir/$proposal_id.json"
-
-  jq -nc \
+  local proposal_payload
+  proposal_payload=$(jq -nc \
     --argjson id "$proposal_id" \
     --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --arg status "pending" \
@@ -858,7 +783,8 @@ propose_features() {
       created_at: $created,
       status: $status,
       features: $features
-    }' > "$proposal_file"
+    }')
+  save_proposal_json "$proposal_payload"
 
   emit "ideation_done" "Proposed $feature_count new features"
 
@@ -869,22 +795,16 @@ propose_features() {
   else
     printf "  ${C_DIM}No features proposed${C_RESET}\n"
   fi
-  printf "\n  ${C_DIM}Saved: $proposal_file${C_RESET}\n\n"
+  printf "\n  ${C_DIM}Saved in state.db${C_RESET}\n\n"
 }
 
 check_and_propose_features() {
   [ -f "product_brief.md" ] || return 0
 
-  local proposals_dir="$AGENTIFY_DIR/proposals"
-  if [ -d "$proposals_dir" ]; then
-    for proposal_file in "$proposals_dir"/*.json; do
-      [ -f "$proposal_file" ] || continue
-      local status
-      status=$(jq -r '.status // ""' "$proposal_file" 2>/dev/null || echo "")
-      if [ "$status" = "pending" ]; then
-        return 0
-      fi
-    done
+  local proposals_json
+  proposals_json=$(proposal_list_json)
+  if [ "$(echo "$proposals_json" | jq '[.[] | select(.status == "pending")] | length')" -gt 0 ]; then
+    return 0
   fi
 
   propose_features

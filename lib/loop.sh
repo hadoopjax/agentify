@@ -13,8 +13,6 @@ C_RED="\033[38;5;203m"
 
 # -- Config --
 AGENTIFY_DIR=".agentify"
-EVENTS_FILE="$AGENTIFY_DIR/events.jsonl"
-STATE_FILE="$AGENTIFY_DIR/state.json"
 WORKERS_DIR="$AGENTIFY_DIR/workers"
 WORKTREE_DIR="$AGENTIFY_DIR/worktrees"
 LOGS_DIR="$AGENTIFY_DIR/logs"
@@ -36,6 +34,16 @@ AUTO_GROUP_COOLDOWN_SECONDS="${AUTO_GROUP_COOLDOWN_SECONDS:-600}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROMPTS_DIR="$SCRIPT_DIR/../prompts"
+CONTROL_PLANE="$SCRIPT_DIR/control_plane.py"
+
+control_plane() {
+  AGENTIFY_DIR="$AGENTIFY_DIR" python3 "$CONTROL_PLANE" "$@"
+}
+
+get_state() {
+  local key="$1" default="${2:-}"
+  control_plane kv-get "$key" --default "$default"
+}
 
 # -- Logging --
 log() {
@@ -49,28 +57,16 @@ wlog() {
 
 emit() {
   local type="$1"; shift
-  jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg type "$type" --arg msg "$*" \
-    '{ts: $ts, type: $type, msg: $msg}' >> "$EVENTS_FILE"
+  control_plane event-emit "$type" "$*" > /dev/null
 }
 
-# -- Global state (locked for concurrent access) --
+# -- Global state --
 set_state() {
-  local lockdir="$AGENTIFY_DIR/.state.lock"
-  while ! mkdir "$lockdir" 2>/dev/null; do sleep 0.1; done
-  local tmp=$(mktemp)
-  jq --arg k "$1" --arg v "$2" '.[$k] = $v' "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
-  rmdir "$lockdir"
+  control_plane kv-set "$1" "$2" > /dev/null
 }
 
 increment_global() {
-  local key="$1"
-  local lockdir="$AGENTIFY_DIR/.state.lock"
-  while ! mkdir "$lockdir" 2>/dev/null; do sleep 0.1; done
-  local val=$(jq -r ".$key // \"0\"" "$STATE_FILE")
-  val=$((val + 1))
-  local tmp=$(mktemp)
-  jq --arg k "$key" --arg v "$val" '.[$k] = $v' "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
-  rmdir "$lockdir"
+  control_plane kv-increment "$1" --default 0
 }
 
 epoch_to_iso() {
@@ -79,12 +75,7 @@ epoch_to_iso() {
 }
 
 clear_pause_state() {
-  local lockdir="$AGENTIFY_DIR/.state.lock"
-  while ! mkdir "$lockdir" 2>/dev/null; do sleep 0.1; done
-  local tmp
-  tmp=$(mktemp)
-  jq 'del(.pause_kind, .pause_reason, .paused_until, .paused_until_epoch)' "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
-  rmdir "$lockdir"
+  control_plane kv-delete pause_kind pause_reason paused_until paused_until_epoch > /dev/null
 }
 
 set_pause_state() {
@@ -93,31 +84,19 @@ set_pause_state() {
   now=$(date +%s)
   until_epoch=$((now + seconds))
   until_iso=$(epoch_to_iso "$until_epoch")
-  previous_until=$(jq -r '.paused_until_epoch // 0' "$STATE_FILE")
-  previous_kind=$(jq -r '.pause_kind // ""' "$STATE_FILE")
-
-  local lockdir="$AGENTIFY_DIR/.state.lock"
-  while ! mkdir "$lockdir" 2>/dev/null; do sleep 0.1; done
-  local tmp
-  tmp=$(mktemp)
-  jq \
-    --arg kind "$kind" \
-    --arg reason "$reason" \
-    --arg until_iso "$until_iso" \
-    --argjson until_epoch "$until_epoch" \
-    '.pause_kind = $kind
-     | .pause_reason = $reason
-     | .paused_until = $until_iso
-     | .paused_until_epoch = $until_epoch' \
-    "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
-  rmdir "$lockdir"
+  previous_until=$(get_state "paused_until_epoch" "0")
+  previous_kind=$(get_state "pause_kind" "")
+  set_state "pause_kind" "$kind"
+  set_state "pause_reason" "$reason"
+  set_state "paused_until" "$until_iso"
+  set_state "paused_until_epoch" "$until_epoch"
 
   [ "$until_epoch" -gt "${previous_until:-0}" ] || [ "$kind" != "$previous_kind" ]
 }
 
 pause_remaining_seconds() {
   local until now
-  until=$(jq -r '.paused_until_epoch // 0' "$STATE_FILE")
+  until=$(get_state "paused_until_epoch" "0")
   now=$(date +%s)
   if [ "${until:-0}" -gt "$now" ]; then
     echo $((until - now))
@@ -128,13 +107,13 @@ pause_remaining_seconds() {
 
 resume_pause_if_expired() {
   local until now reason
-  until=$(jq -r '.paused_until_epoch // 0' "$STATE_FILE")
+  until=$(get_state "paused_until_epoch" "0")
   now=$(date +%s)
   if [ "${until:-0}" -le 0 ] || [ "$until" -gt "$now" ]; then
     return 1
   fi
 
-  reason=$(jq -r '.pause_reason // "pause window expired"' "$STATE_FILE")
+  reason=$(get_state "pause_reason" "pause window expired")
   clear_pause_state
   emit "resumed" "Resuming dispatch after pause: $reason"
   return 0
@@ -157,7 +136,7 @@ pause_dispatch_for_quota() {
   local reason until_iso
   reason="Codex quota or billing failure while working on #$num $title"
   if set_pause_state "quota" "$reason" "$PAUSE_ON_QUOTA_SECONDS"; then
-    until_iso=$(jq -r '.paused_until // ""' "$STATE_FILE")
+    until_iso=$(get_state "paused_until" "")
     emit "paused" "[#$num] Paused new work until $until_iso after Codex quota exhaustion"
   fi
   write_worker_log "$worker_log" "Global dispatch paused for $PAUSE_ON_QUOTA_SECONDS seconds due to quota or billing failure"
@@ -168,7 +147,7 @@ pause_dispatch_for_github_rate_limit() {
   local reason until_iso
   reason="GitHub API rate limit while working on #$num $title"
   if set_pause_state "github" "$reason" "$PAUSE_ON_GITHUB_RATE_LIMIT_SECONDS"; then
-    until_iso=$(jq -r '.paused_until // ""' "$STATE_FILE")
+    until_iso=$(get_state "paused_until" "")
     emit "paused" "[#$num] Paused GitHub work until $until_iso after API rate limit"
   fi
   write_worker_log "$worker_log" "Global dispatch paused for $PAUSE_ON_GITHUB_RATE_LIMIT_SECONDS seconds due to GitHub API rate limiting"
@@ -256,7 +235,7 @@ report_self_error() {
 $detail
 \`\`\`
 
-**Target repo:** $(jq -r '.repo // "unknown"' "$STATE_FILE" 2>/dev/null)
+**Target repo:** $(get_state "repo" "unknown")
 **Timestamp:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 <!-- agentify-self-heal:$signature -->"
@@ -269,17 +248,9 @@ $detail
 }
 
 # -- Per-worker state (no lock needed, one writer per file) --
-worker_state_file() {
-  local num="$1"
-  echo "$WORKERS_DIR/$num.json"
-}
-
 worker_field() {
   local num="$1" key="$2"
-  local wfile
-  wfile=$(worker_state_file "$num")
-  [ -f "$wfile" ] || return 1
-  jq -r --arg k "$key" '.[$k] // empty' "$wfile" 2>/dev/null
+  control_plane worker-get "$num" --key "$key"
 }
 
 sanitize_pr_url() {
@@ -303,19 +274,13 @@ worker_issue_ref() {
 
 set_worker() {
   local num="$1" key="$2" val="$3"
-  local wfile
-  wfile=$(worker_state_file "$num")
-  local tmp=$(mktemp)
-  if [ -f "$wfile" ]; then
-    jq --arg k "$key" --arg v "$val" '.[$k] = $v' "$wfile" > "$tmp" && mv "$tmp" "$wfile"
-  else
-    jq -nc --arg k "$key" --arg v "$val" '{($k): $v}' > "$wfile"
-  fi
+  control_plane worker-set "$num" "$key" "$val" > /dev/null
 }
 
 remove_worker() {
   local num="$1"
-  rm -f "$WORKERS_DIR/$num.json" "$WORKERS_DIR/$num.pid"
+  control_plane worker-delete "$num" > /dev/null
+  rm -f "$WORKERS_DIR/$num.pid"
 }
 
 worker_log_file() {
@@ -381,8 +346,76 @@ render_prompt() {
   content="${content//\{\{BODY\}\}/$ISSUE_BODY}"
   content="${content//\{\{DIFF\}\}/${ISSUE_DIFF-}}"
   content="${content//\{\{REVIEW\}\}/${REVIEW_TEXT-}}"
+  content="${content//\{\{VALIDATION_RESULTS\}\}/${VALIDATION_RESULTS-Not run.}}"
   content="${content//\{\{REPO_CONTEXT\}\}/$(repo_context)}"
   echo "$content"
+}
+
+extract_agentify_metadata() {
+  local body="$1"
+  BODY="$body" python3 - <<'PY'
+import json
+import os
+import re
+
+body = os.environ.get("BODY", "")
+match = re.search(r"```agentify\s*(\{.*?\})\s*```", body, re.S)
+if not match:
+    print('{"validation_commands":[],"required_checks":[],"files_of_interest":[]}')
+    raise SystemExit(0)
+
+try:
+    payload = json.loads(match.group(1))
+except Exception:
+    payload = {}
+
+print(json.dumps({
+    "validation_commands": payload.get("validation_commands") or [],
+    "required_checks": payload.get("required_checks") or [],
+    "files_of_interest": payload.get("files_of_interest") or [],
+}))
+PY
+}
+
+run_local_validation() {
+  local num="$1" title="$2" wt_path="$3" worker_log="$4" body="$5"
+  local metadata commands_json count summary_file
+  metadata=$(extract_agentify_metadata "$body")
+  commands_json=$(echo "$metadata" | jq -c '.validation_commands // []')
+  set_worker "$num" "validation_commands" "$commands_json"
+  set_worker "$num" "required_checks" "$(echo "$metadata" | jq -c '.required_checks // []')"
+  set_worker "$num" "files_of_interest" "$(echo "$metadata" | jq -c '.files_of_interest // []')"
+  count=$(echo "$commands_json" | jq 'length')
+  if [ "$count" -eq 0 ]; then
+    VALIDATION_RESULTS="No explicit validation_commands declared for this issue."
+    set_worker "$num" "validation_results" "$VALIDATION_RESULTS"
+    return 0
+  fi
+
+  summary_file=$(mktemp)
+  : > "$summary_file"
+  write_worker_log "$worker_log" "Running $count validation command(s)"
+  for ((i=0; i<count; i++)); do
+    local cmd status
+    cmd=$(echo "$commands_json" | jq -r ".[$i]")
+    write_worker_log "$worker_log" "Validation command: $cmd"
+    if (cd "$wt_path" && bash -lc "$cmd") >> "$worker_log" 2>&1; then
+      status="PASS"
+    else
+      status="FAIL"
+      printf '[%s] %s :: %s\n' "$status" "$cmd" "$title" >> "$summary_file"
+      VALIDATION_RESULTS=$(cat "$summary_file")
+      set_worker "$num" "validation_results" "$VALIDATION_RESULTS"
+      rm -f "$summary_file"
+      return 1
+    fi
+    printf '[%s] %s\n' "$status" "$cmd" >> "$summary_file"
+  done
+
+  VALIDATION_RESULTS=$(cat "$summary_file")
+  set_worker "$num" "validation_results" "$VALIDATION_RESULTS"
+  rm -f "$summary_file"
+  return 0
 }
 
 # -- Worktree helpers --
@@ -486,7 +519,35 @@ wait_for_ci() {
     ((waited += 10))
     emit "ci_waiting" "[#$num] CI running... (${waited}s)"
   done
-  return 0
+  return 2
+}
+
+required_checks_passed() {
+  local pr="$1" required_checks_json="$2"
+  REQUIRED_CHECKS_JSON="${required_checks_json:-[]}" PR_REF="$pr" python3 - <<'PY'
+import json
+import os
+import subprocess
+
+required = json.loads(os.environ.get("REQUIRED_CHECKS_JSON", "[]") or "[]")
+if not required:
+    raise SystemExit(0)
+
+result = subprocess.run(
+    ["gh", "pr", "checks", os.environ["PR_REF"], "--json", "name,state"],
+    capture_output=True,
+    text=True,
+)
+if result.returncode != 0:
+    raise SystemExit(1)
+
+checks = json.loads(result.stdout or "[]")
+states = {item.get("name"): item.get("state") for item in checks}
+ok_states = {"SUCCESS", "PASS", "SKIPPED"}
+for name in required:
+    if states.get(name) not in ok_states:
+        raise SystemExit(1)
+PY
 }
 
 worktree_has_uncommitted_changes() {
@@ -601,30 +662,26 @@ mark_worker_resumable_failure() {
   increment_global "errors"
 
   # Track per-worker retry count + timestamp for backoff
-  local wfile
-  wfile=$(worker_state_file "$num")
-  if [ -f "$wfile" ]; then
-    local retries
-    retries=$(jq -r '.retries // 0' "$wfile" 2>/dev/null || echo 0)
-    retries=$((retries + 1))
-    local now
-    now=$(date +%s)
-    local tmp=$(mktemp)
-    jq --argjson r "$retries" --argjson t "$now" '.retries = $r | .failed_at = $t' "$wfile" > "$tmp" && mv "$tmp" "$wfile"
-    if [ "$retries" -ge 2 ]; then
-      write_worker_log "$worker_log" "Blocked after $retries consecutive failures — auto-triaging"
-      emit "blocked" "[#$num] Blocked after $retries retries: $message — triggering auto-triage"
-      set_worker "$num" "phase" "merge_blocked"
-      set_worker "$num" "last_error" "Blocked after $retries retries: $message"
-      # Auto-triage: immediately spawn manager to diagnose and fix
-      manage_issue "$num" &
-      echo "$!" > "$WORKERS_DIR/$num.pid"
-    fi
+  local retries now
+  retries=$(worker_field "$num" "retries")
+  retries="${retries:-0}"
+  retries=$((retries + 1))
+  now=$(date +%s)
+  set_worker "$num" "retries" "$retries"
+  set_worker "$num" "failed_at" "$now"
+  if [ "$retries" -ge 2 ]; then
+    write_worker_log "$worker_log" "Blocked after $retries consecutive failures — auto-triaging"
+    emit "blocked" "[#$num] Blocked after $retries retries: $message — triggering auto-triage"
+    set_worker "$num" "phase" "merge_blocked"
+    set_worker "$num" "last_error" "Blocked after $retries retries: $message"
+    # Auto-triage: immediately spawn manager to diagnose and fix
+    manage_issue "$num" &
+    echo "$!" > "$WORKERS_DIR/$num.pid"
   fi
 
   # Self-heal: report persistent failures to the agentify repo
   local total_errors
-  total_errors=$(jq -r '.errors // "0"' "$STATE_FILE" 2>/dev/null || echo "0")
+  total_errors=$(get_state "errors" "0")
   if [ "$total_errors" -ge 10 ] && [ $(( total_errors % 25 )) -eq 0 ]; then
     report_self_error "high-error-rate-${total_errors}" \
       "High error rate: $total_errors errors in current run" \
@@ -891,12 +948,19 @@ run_retry_phase() {
     fi
   fi
 
+  if ! run_local_validation "$num" "$title" "$wt_path" "$worker_log" "$ISSUE_BODY"; then
+    write_worker_log "$worker_log" "Validation failed after retry"
+    mark_worker_resumable_failure "$num" "retrying" "Validation failed after retry on #$num" "$worker_log"
+    return 1
+  fi
+
   if ! prepare_branch_for_handoff "$num" "$title" "$branch" "$wt_path" "$worker_log"; then
     return 1
   fi
 
   set_worker "$num" "phase" "reviewing"
   ISSUE_DIFF=$(gh pr diff "$pr_url" 2>> "$worker_log") || ISSUE_DIFF=""
+  VALIDATION_RESULTS=$(worker_field "$num" "validation_results")
   review_prompt=$(render_prompt "review.md")
   review=$(claude -p --model "$CLAUDE_MODEL" "$review_prompt")
 
@@ -937,6 +1001,7 @@ run_review_phase() {
     return 1
   fi
 
+  VALIDATION_RESULTS=$(worker_field "$num" "validation_results")
   review_prompt=$(render_prompt "review.md")
   review=$(claude -p --model "$CLAUDE_MODEL" "$review_prompt")
 
@@ -960,11 +1025,20 @@ $review" > /dev/null 2>&1 || true
 
 run_ci_phase() {
   local num="$1" title="$2" branch="$3" wt_path="$4" worker_log="$5" pr_url="$6"
+  local ci_status required_checks
 
   set_worker "$num" "phase" "ci"
   set_worker "$num" "pr_url" "$pr_url"
   sleep 5
-  if ! wait_for_ci "$pr_url" "$num"; then
+  wait_for_ci "$pr_url" "$num"
+  ci_status=$?
+  if [ "$ci_status" -eq 2 ]; then
+    write_worker_log "$worker_log" "CI still pending for $pr_url after 300s; deferring re-check"
+    emit "ci_waiting" "[#$num] CI still pending after 300s"
+    set_worker "$num" "phase" "ci_waiting"
+    return 0
+  fi
+  if [ "$ci_status" -ne 0 ]; then
     write_worker_log "$worker_log" "CI failed for $pr_url"
     emit "ci_failed" "[#$num] CI failed"
     gh pr comment "$pr_url" --body "🤖 CI failed. Leaving PR open." > /dev/null 2>&1 || true
@@ -974,12 +1048,25 @@ run_ci_phase() {
 
   emit "ci_passed" "[#$num] CI passed"
   write_worker_log "$worker_log" "CI passed"
+  required_checks=$(worker_field "$num" "required_checks")
+  if ! required_checks_passed "$pr_url" "${required_checks:-[]}"; then
+    write_worker_log "$worker_log" "Required checks are not all successful for $pr_url"
+    emit "ci_failed" "[#$num] Required checks missing or failing"
+    mark_worker_blocked_for_human "$num" "ci_failed" "Required checks missing or failing for $pr_url" "$worker_log"
+    return 1
+  fi
   run_review_phase "$num" "$title" "$branch" "$wt_path" "$worker_log" "$pr_url"
 }
 
 run_post_coding_pipeline() {
-  local num="$1" title="$2" branch="$3" wt_path="$4" worker_log="$5"
+  local num="$1" title="$2" branch="$3" wt_path="$4" worker_log="$5" body="${6:-}"
   local pr_url
+
+  if ! run_local_validation "$num" "$title" "$wt_path" "$worker_log" "$body"; then
+    write_worker_log "$worker_log" "Validation failed before handoff"
+    mark_worker_resumable_failure "$num" "coding" "Validation failed for #$num" "$worker_log"
+    return 1
+  fi
 
   if ! prepare_branch_for_handoff "$num" "$title" "$branch" "$wt_path" "$worker_log"; then
     return 1
@@ -1036,9 +1123,9 @@ resume_worker() {
   case "$phase" in
     coding|pushing|pr)
       emit "coding_resume" "[#$num] Resuming from preserved local commit(s)"
-      run_post_coding_pipeline "$num" "$ISSUE_TITLE" "$branch" "$wt_path" "$worker_log"
+      run_post_coding_pipeline "$num" "$ISSUE_TITLE" "$branch" "$wt_path" "$worker_log" "$ISSUE_BODY"
       ;;
-    ci)
+    ci|ci_waiting)
       [ -n "$pr_url" ] || pr_url=$(sanitize_pr_url "$(existing_pr_url_for_branch "$branch")")
       [ -n "$pr_url" ] && set_worker "$num" "pr_url" "$pr_url"
       [ -n "$pr_url" ] || {
@@ -1104,9 +1191,9 @@ manager_backoff_elapsed() {
 
 manage_issue() {
   local num="$1"
-  local wfile title branch worker_log result_json status reason next_phase pr_url now next_after previous_phase issue_ref pr_ref
-  wfile=$(worker_state_file "$num")
-  [ -f "$wfile" ] || return 1
+  local worker_json title branch worker_log result_json status reason next_phase pr_url now next_after previous_phase issue_ref pr_ref
+  worker_json=$(control_plane worker-get "$num")
+  [ "$worker_json" != "{}" ] || return 1
 
   title=$(worker_field "$num" "title")
   branch=$(worker_field "$num" "branch")
@@ -1306,7 +1393,7 @@ work_issue() {
     return 1
   fi
 
-  run_post_coding_pipeline "$num" "$title" "$branch" "$wt_path" "$worker_log"
+  run_post_coding_pipeline "$num" "$title" "$branch" "$wt_path" "$worker_log" "$body"
 }
 
 # ============================================================
@@ -1314,21 +1401,14 @@ work_issue() {
 # ============================================================
 init_run() {
   mkdir -p "$AGENTIFY_DIR" "$WORKERS_DIR" "$WORKTREE_DIR" "$LOGS_DIR"
-  if [ -f "$STATE_FILE" ]; then
-    local now tmp
-    now=$(date +%s)
-    tmp=$(mktemp)
-    jq --argjson now "$now" \
-      '.completed = (.completed // "0")
-       | .errors = (.errors // "0")
-       | if (.paused_until_epoch // 0) > $now then .
-         else del(.pause_kind, .pause_reason, .paused_until, .paused_until_epoch)
-         end' \
-      "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
-  else
-    echo '{"completed":"0","errors":"0"}' > "$STATE_FILE"
+  control_plane init > /dev/null
+  [ -n "$(get_state "completed" "")" ] || set_state "completed" "0"
+  [ -n "$(get_state "errors" "")" ] || set_state "errors" "0"
+  local now
+  now=$(date +%s)
+  if [ "$(get_state "paused_until_epoch" "0")" -le "$now" ]; then
+    clear_pause_state
   fi
-  [ -f "$EVENTS_FILE" ] || touch "$EVENTS_FILE"
   # Clean stale worker state from previous runs
   rm -f "$WORKERS_DIR"/*.pid 2>/dev/null
   # Prune stale worktrees from previous runs
@@ -1355,21 +1435,17 @@ recover_orphaned_wip_issues() {
       continue
     fi
 
-    local wfile
-    wfile=$(worker_state_file "$num")
-    if [ -f "$wfile" ]; then
-      # Worker state exists — check if the process is actually alive
-      local pidfile="${wfile%.json}.pid"
+    if [ "$(control_plane worker-get "$num" 2>/dev/null | jq -r 'keys | length' 2>/dev/null || echo 0)" -gt 0 ]; then
+      local pidfile="$WORKERS_DIR/$num.pid"
       if [ -f "$pidfile" ]; then
         local wpid
         wpid=$(cat "$pidfile" 2>/dev/null || echo "0")
         if kill -0 "$wpid" 2>/dev/null; then
-          continue  # Process alive, skip
+          continue
         fi
-        # Dead process — clean up stale files
         rm -f "$pidfile"
       fi
-      rm -f "$wfile"
+      control_plane worker-delete "$num" > /dev/null
     fi
 
     gh issue edit "$num" --remove-label "agent-wip" --add-label "agent" 2>/dev/null || continue
@@ -1381,13 +1457,13 @@ resume_orphaned_workers() {
   local slots="${1:-0}"
   [ "$slots" -le 0 ] && return 0
 
-  for wfile in "$WORKERS_DIR"/*.json; do
-    [ -f "$wfile" ] || continue
-
-    local num phase title
-    num=$(basename "$wfile" .json)
-    phase=$(jq -r '.phase // "coding"' "$wfile" 2>/dev/null || echo "coding")
-    title=$(jq -r '.title // ""' "$wfile" 2>/dev/null || echo "")
+  local workers_json count
+  workers_json=$(control_plane worker-list)
+  count=$(echo "$workers_json" | jq 'keys | length' 2>/dev/null || echo 0)
+  for num in $(echo "$workers_json" | jq -r 'keys[]' 2>/dev/null); do
+    local phase title
+    phase=$(echo "$workers_json" | jq -r --arg id "$num" '.[$id].phase // "coding"' 2>/dev/null || echo "coding")
+    title=$(echo "$workers_json" | jq -r --arg id "$num" '.[$id].title // ""' 2>/dev/null || echo "")
 
     is_issue_claimed "$num" && continue
     case "$phase" in
@@ -1424,13 +1500,12 @@ spawn_management_workers() {
   local slots="${1:-0}"
   [ "$slots" -le 0 ] && return 0
 
-  for wfile in "$WORKERS_DIR"/*.json; do
-    [ -f "$wfile" ] || continue
-
-    local num phase title
-    num=$(basename "$wfile" .json)
-    phase=$(jq -r '.phase // "coding"' "$wfile" 2>/dev/null || echo "coding")
-    title=$(jq -r '.title // ""' "$wfile" 2>/dev/null || echo "")
+  local workers_json
+  workers_json=$(control_plane worker-list)
+  for num in $(echo "$workers_json" | jq -r 'keys[]' 2>/dev/null); do
+    local phase title
+    phase=$(echo "$workers_json" | jq -r --arg id "$num" '.[$id].phase // "coding"' 2>/dev/null || echo "coding")
+    title=$(echo "$workers_json" | jq -r --arg id "$num" '.[$id].title // ""' 2>/dev/null || echo "")
 
     manager_phase_eligible "$phase" || continue
     manager_backoff_elapsed "$num" || continue
@@ -1474,7 +1549,8 @@ main_loop() {
   while true; do
     # Check run limit
     if [ "$MAX_RUNS" -gt 0 ]; then
-      local completed=$(jq -r '.completed // "0"' "$STATE_FILE")
+      local completed
+      completed=$(get_state "completed" "0")
       if [ "$completed" -ge "$MAX_RUNS" ]; then
         log "${C_GREEN}Done. Completed $completed runs."
         emit "loop_end" "Completed $completed runs"
@@ -1501,10 +1577,8 @@ main_loop() {
     recover_orphaned_wip_issues "runtime"
 
     # Advance epics every cycle (detect completed issues, start next waves)
-    if [ -d "$AGENTIFY_DIR/epics" ]; then
-      source "$SCRIPT_DIR/planner.sh" 2>/dev/null
-      check_epic_completion 2>/dev/null || true
-    fi
+    source "$SCRIPT_DIR/planner.sh" 2>/dev/null
+    check_epic_completion 2>/dev/null || true
 
     resume_pause_if_expired || true
 
@@ -1552,10 +1626,8 @@ main_loop() {
           echo "$!" > "$WORKERS_DIR/$num.pid"
         done
       elif [ "$active" -eq 0 ]; then
-        if [ -d "$AGENTIFY_DIR/epics" ]; then
-          source "$SCRIPT_DIR/planner.sh" 2>/dev/null
-          check_epic_completion
-        fi
+        source "$SCRIPT_DIR/planner.sh" 2>/dev/null
+        check_epic_completion
 
         # Auto-group: when idle, check for ungrouped issues and propose epics
         if [ -z "${_last_auto_group_epoch:-}" ]; then
@@ -1599,10 +1671,8 @@ main_loop() {
     fi
 
     # Check if any epics completed
-    if [ -d "$AGENTIFY_DIR/epics" ]; then
-      source "$SCRIPT_DIR/planner.sh" 2>/dev/null
-      check_epic_completion
-    fi
+    source "$SCRIPT_DIR/planner.sh" 2>/dev/null
+    check_epic_completion
 
     sleep 5
   done
@@ -1613,6 +1683,7 @@ main_loop() {
     [ -f "$pidfile" ] || continue
     wait "$(cat "$pidfile")" 2>/dev/null
     local num=$(basename "$pidfile" .pid)
-    rm -f "$pidfile" "$WORKERS_DIR/$num.json"
+    rm -f "$pidfile"
+    control_plane worker-delete "$num" > /dev/null
   done
 }

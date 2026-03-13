@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")")" && pwd)"
 LIB_DIR="$SCRIPT_DIR/../lib"
+CONTROL_PLANE="$LIB_DIR/control_plane.py"
 AGENT_ENV_FILE="${AGENTIFY_ENV_FILE:-.agentify/agent.env}"
 
 # Ensure npm global bin is in PATH (for codex, etc.)
@@ -68,6 +69,7 @@ C_TEAL="\033[38;5;43m"
 C_YELLOW="\033[38;5;222m"
 
 DASHBOARD_PORT="${DASHBOARD_PORT:-4242}"
+DASHBOARD_HOST="${DASHBOARD_HOST:-127.0.0.1}"
 DASHBOARD_PID=""
 
 usage() {
@@ -91,6 +93,7 @@ Options:
   --max-runs N         Stop after N completed runs (0 = unlimited)
   --poll N             Seconds between idle checks (default: 60)
   --port N             Dashboard port (default: 4242)
+  --host HOST          Dashboard bind host (default: 127.0.0.1)
   --codex-model M      Codex model (default: gpt-5.4)
   --codex-effort L     Reasoning effort: low, medium, high (default: high)
   --manager-model M    Manager model (default: gpt-5.4)
@@ -232,9 +235,9 @@ cmd_test() {
 
 cmd_status() {
   require_repo
-  if [ -f ".agentify/state.json" ]; then
+  if [ -f ".agentify/state.db" ]; then
     echo "State:"
-    jq '.' .agentify/state.json
+    python3 "$CONTROL_PLANE" event-list --after 0 | jq '.'
     echo ""
   fi
 
@@ -261,15 +264,19 @@ cmd_run() {
   # Start dashboard
   if [ "$NO_DASHBOARD" != "true" ]; then
     mkdir -p .agentify
-    [ -f .agentify/state.json ] || echo '{}' > .agentify/state.json
-    [ -f .agentify/events.jsonl ] || touch .agentify/events.jsonl
+    python3 "$CONTROL_PLANE" init > /dev/null
+    export AGENTIFY_ADMIN_TOKEN="${AGENTIFY_ADMIN_TOKEN:-$(python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(24))
+PY
+)}"
 
-    AGENTIFY_DIR=".agentify" python3 "$LIB_DIR/dashboard.py" "$DASHBOARD_PORT" &
+    AGENTIFY_DIR=".agentify" AGENTIFY_HOST="$DASHBOARD_HOST" python3 "$LIB_DIR/dashboard.py" "$DASHBOARD_PORT" --host "$DASHBOARD_HOST" &
     DASHBOARD_PID=$!
-    printf "  ${C_DIM}├─${C_RESET} dashboard: ${C_TEAL}http://localhost:${DASHBOARD_PORT}${C_RESET}\n"
+    printf "  ${C_DIM}├─${C_RESET} dashboard: ${C_TEAL}http://${DASHBOARD_HOST}:${DASHBOARD_PORT}${C_RESET}\n"
 
-    if command -v open > /dev/null 2>&1; then
-      sleep 0.3 && open "http://localhost:$DASHBOARD_PORT" 2>/dev/null &
+    if command -v open > /dev/null 2>&1 && { [ "$DASHBOARD_HOST" = "127.0.0.1" ] || [ "$DASHBOARD_HOST" = "localhost" ]; }; then
+      sleep 0.3 && open "http://${DASHBOARD_HOST}:$DASHBOARD_PORT" 2>/dev/null &
     fi
   fi
 
@@ -298,6 +305,7 @@ while [[ $# -gt 0 ]]; do
     --max-runs)      shift; MAX_RUNS="$1"; shift ;;
     --poll)          shift; POLL_INTERVAL="$1"; shift ;;
     --port)          shift; DASHBOARD_PORT="$1"; shift ;;
+    --host)          shift; DASHBOARD_HOST="$1"; shift ;;
     --concurrency)   shift; MAX_CONCURRENT="$1"; shift ;;
     --codex-model)   shift; CODEX_MODEL="$1"; shift ;;
     --codex-effort)  shift; CODEX_EFFORT="$1"; shift ;;
@@ -315,7 +323,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-export MAX_RUNS POLL_INTERVAL MAX_CONCURRENT CODEX_MODEL CODEX_EFFORT MANAGER_MODEL MANAGER_EFFORT CLAUDE_MODEL AGENTIFY_SELF_REPO AUTO_GROUP_COOLDOWN_SECONDS AUTO_IDEATION_COOLDOWN_SECONDS
+export MAX_RUNS POLL_INTERVAL MAX_CONCURRENT CODEX_MODEL CODEX_EFFORT MANAGER_MODEL MANAGER_EFFORT CLAUDE_MODEL AGENTIFY_SELF_REPO AUTO_GROUP_COOLDOWN_SECONDS AUTO_IDEATION_COOLDOWN_SECONDS DASHBOARD_HOST
 
 [ -z "$COMMAND" ] && COMMAND="run"
 
@@ -330,8 +338,7 @@ cmd_plan() {
   fi
 
   mkdir -p .agentify
-  [ -f .agentify/state.json ] || echo '{}' > .agentify/state.json
-  [ -f .agentify/events.jsonl ] || touch .agentify/events.jsonl
+  python3 "$CONTROL_PLANE" init > /dev/null
 
   source "$LIB_DIR/loop.sh"
   source "$LIB_DIR/planner.sh"
@@ -344,8 +351,7 @@ cmd_group() {
   require_gh_auth
 
   mkdir -p .agentify
-  [ -f .agentify/state.json ] || echo '{}' > .agentify/state.json
-  [ -f .agentify/events.jsonl ] || touch .agentify/events.jsonl
+  python3 "$CONTROL_PLANE" init > /dev/null
 
   source "$LIB_DIR/loop.sh"
   source "$LIB_DIR/planner.sh"
@@ -359,20 +365,12 @@ cmd_approve() {
     echo "Usage: agentify approve <epic-id>"
     echo ""
     echo "Active epics:"
-    for f in .agentify/epics/*.json; do
-      [ -f "$f" ] || continue
-      local id=$(jq -r '.id' "$f")
-      local title=$(jq -r '.title' "$f")
-      local status=$(jq -r '.status' "$f")
-      local pending=$(jq '[.proposals[] | select(.status == "pending")] | length' "$f")
-      echo "  $id  $title  ($status, $pending pending)"
-    done
+    python3 "$CONTROL_PLANE" epic-list | jq -r '.epics[]? | "  \(.id)  \(.title)  (\(.status), \([.proposals[] | select(.status == "pending")] | length) pending)"'
     exit 1
   fi
 
   mkdir -p .agentify
-  [ -f .agentify/state.json ] || echo '{}' > .agentify/state.json
-  [ -f .agentify/events.jsonl ] || touch .agentify/events.jsonl
+  python3 "$CONTROL_PLANE" init > /dev/null
 
   source "$LIB_DIR/loop.sh"
   source "$LIB_DIR/planner.sh"
@@ -419,8 +417,7 @@ cmd_manage() {
   fi
 
   mkdir -p .agentify
-  [ -f .agentify/state.json ] || echo '{}' > .agentify/state.json
-  [ -f .agentify/events.jsonl ] || touch .agentify/events.jsonl
+  python3 "$CONTROL_PLANE" init > /dev/null
 
   source "$LIB_DIR/loop.sh"
   if [ -n "$MANAGE_PR" ]; then

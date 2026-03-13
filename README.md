@@ -74,7 +74,7 @@ Point agentify at a repo with existing issues:
 
 1. `agentify group` asks Claude to cluster eligible open issues into epic proposals
 2. GPT-5.4 critiques the grouping for overlap, missing groups, and unsafe sequencing
-3. Proposals stored in `.agentify/epics/*.json`
+3. Proposals stored in the local SQLite state store at `.agentify/state.db`
 4. Approving a grouped epic starts its first execution wave
 5. Later waves unlock automatically after the prior wave closes
 6. One issue at a time within each epic; different epics run in parallel
@@ -87,8 +87,9 @@ Point agentify at a repo with existing issues:
 2. Each issue gets its own **git worktree** + background worker process
 3. Worker claims the issue (swaps `agent` → `agent-wip` label)
 4. Codex codes in the worktree — your checkout stays on `main`
-5. Opens a PR, waits for CI
-6. Claude reviews the diff — LGTM or requests changes
+5. Runs issue-declared validation commands when available
+6. Opens a PR, waits for CI and required checks
+7. Claude reviews the diff alongside the recorded validation results
 7. One retry with feedback if changes requested
 8. Merges on approval, cleans up, picks next issue
 9. Epic advancement runs every cycle — detects completed issues, starts next waves
@@ -113,7 +114,7 @@ Point agentify at a repo with existing issues:
 
 **Rate limit protection:**
 - Detects GitHub API rate limit errors and pauses all dispatch globally
-- Pause state persists in `.agentify/state.json`, survives restarts
+- Pause state persists in `.agentify/state.db`, survives restarts
 - Dashboard shows pause reason and estimated resume time
 - Automatically resumes when the rate limit resets
 
@@ -145,6 +146,8 @@ The dashboard is not a separate thing — `agentify` starts both the dashboard a
 - Untriaged issues — assign to agent or skip
 
 **Browser notifications** via Notification API when new items need attention.
+
+By default the dashboard binds to `127.0.0.1` and all mutating routes require a per-run admin token embedded into the local UI. Use `--host` to opt into a broader bind address.
 
 ## Setup
 
@@ -208,6 +211,7 @@ agentify status           Show state + recent activity
 --max-runs N         Stop after N completed runs (0 = unlimited)
 --poll N             Seconds between idle checks (default: 60)
 --port N             Dashboard port (default: 4242)
+--host HOST          Dashboard bind host (default: 127.0.0.1)
 --codex-model M      Codex model (default: gpt-5.4)
 --codex-effort L     Reasoning effort: low, medium, high (default: high)
 --manager-model M    Manager model (default: gpt-5.4)
@@ -245,7 +249,9 @@ agentify/
 ├── lib/
 │   ├── loop.sh            Dispatcher + parallel workers + failure recovery
 │   ├── planner.sh         Epic planning, grouping, ideation, sequencing
-│   ├── dashboard.py       Threaded HTTP server (state, epics, proposals, interviews, triage)
+│   ├── control_plane.py   Local control-plane CLI for state and queue mutations
+│   ├── state_store.py     SQLite state layer
+│   ├── dashboard.py       Local HTTP server (state, epics, proposals, interviews, triage, streams)
 │   └── index.html         Dashboard UI (dark theme, coral→violet gradient)
 ├── prompts/
 │   ├── plan.md            Epic → issues breakdown
@@ -263,14 +269,27 @@ agentify/
 ```
 
 State lives in the target repo at `.agentify/`:
-- `state.json` — global counters, pause state
-- `events.jsonl` — event log (dashboard timeline)
-- `workers/` — per-worker state files (phase, retries, errors, timestamps)
+- `state.db` — SQLite state store for globals, workers, epics, proposals, interviews, and events
+- `workers/` — PID files for active worker processes
 - `worktrees/` — git worktrees (one per issue)
-- `epics/` — epic plans + proposals + wave state
-- `proposals/` — feature ideation proposals
-- `interviews/` — feature interview state
 - `logs/` — per-worker log files
+
+## Validation Metadata
+
+Planned issues now carry an `agentify` metadata block with:
+- `validation_commands` — shell commands run locally before handoff
+- `required_checks` — CI checks that must report success before review/merge
+- `files_of_interest` — optional scoping hints for the coding agent
+
+This metadata is embedded in approved issue bodies and then enforced by the runtime.
+
+## Tests
+
+Run the focused regression tests with:
+
+```bash
+python3 -m unittest discover -s tests
+```
 
 ## Role Separation
 

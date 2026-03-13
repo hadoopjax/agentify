@@ -18,9 +18,12 @@ For each issue, provide a title and body. The body should include:
 - What needs to change and where
 - Expected behavior after the change
 - How to verify it works (test commands, expected output)
+- Explicit `validation_commands` as shell commands the runtime can execute locally
+- Explicit `required_checks` as CI check names that must pass before merge when applicable
+- Optional `files_of_interest` when the issue should stay focused to a specific area
 
 ## Output Format
 
 Respond with ONLY valid JSON, no markdown fencing, no explanation:
 
-{"issues":[{"title":"...","body":"...","priority":1},{"title":"...","body":"...","priority":2}],"notes":"Any high-level notes about the approach or ordering"}
+{"issues":[{"title":"...","body":"...","priority":1,"validation_commands":["..."],"required_checks":["..."],"files_of_interest":["..."]},{"title":"...","body":"...","priority":2,"validation_commands":["..."],"required_checks":["..."],"files_of_interest":["..."]}],"notes":"Any high-level notes about the approach or ordering"}

@@ -2,6 +2,10 @@ You are reviewing a PR for issue #{{NUM}}: {{TITLE}}
 
 {{REPO_CONTEXT}}
 
+## Validation Results
+
+{{VALIDATION_RESULTS}}
+
 ## Review checklist
 
 1. Does the change actually address the issue?
@@ -9,6 +13,7 @@ You are reviewing a PR for issue #{{NUM}}: {{TITLE}}
 3. Any security issues (injection, auth bypass, data exposure)?
 4. Would this break existing functionality?
 5. Are there unintended side effects?
+6. Do the observed validation results match the issue requirements and changed code?
 
 ## Decision
 
