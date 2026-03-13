@@ -11,8 +11,9 @@ You are working on a git repo. Your task is to fix issue #{{NUM}}.
 
 1. Read the codebase to understand the project structure and conventions
 2. Make the necessary code changes to resolve the issue
-3. Run any existing tests to verify nothing is broken
-4. If tests fail, fix them before finishing
+3. Run the issue's declared validation commands if they are provided
+4. If no declared validation commands exist, run the most relevant existing tests you can identify
+5. If validation fails, fix the issue before finishing
 
 ## Rules
 

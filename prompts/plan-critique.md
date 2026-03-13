@@ -18,9 +18,10 @@ Review the plan critically. Consider:
 3. Is anything missing that would be needed for a complete implementation?
 4. Are there security, performance, or edge case considerations not covered?
 5. Would any issues be difficult for an AI coder to implement without more context?
+6. Are `validation_commands` and `required_checks` concrete enough for deterministic verification?
 
 ## Output Format
 
 Respond with ONLY valid JSON, no markdown fencing:
 
-{"feedback":[{"issue_index":0,"comment":"..."}],"additional_issues":[{"title":"...","body":"...","priority":1}],"notes":"Overall assessment"}
+{"feedback":[{"issue_index":0,"comment":"..."}],"additional_issues":[{"title":"...","body":"...","priority":1,"validation_commands":["..."],"required_checks":["..."],"files_of_interest":["..."]}],"notes":"Overall assessment"}

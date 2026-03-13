@@ -1174,11 +1174,13 @@
 
 <script>
 // ─── State ───
+const ADMIN_TOKEN = __AGENTIFY_ADMIN_TOKEN__;
 let evCount = 0;
 let planning = false;
 let grouping = false;
 let selectedLogIssue = null;
-let logPollTimer = null;
+let eventStream = null;
+let logStream = null;
 let notificationsGranted = false;
 let lastNeedsYouCount = 0;
 let allEvents = [];
@@ -1188,7 +1190,7 @@ const PHASE_CAT = {
   idle:'waiting', starting:'waiting',
   coding:'coding',
   pushing:'shipping', pr:'shipping',
-  ci:'shipping', ci_failed:'blocked',
+  ci:'shipping', ci_waiting:'shipping', ci_failed:'blocked',
   reviewing:'reviewing',
   retrying:'coding',
   merging:'shipping', merge_blocked:'blocked',
@@ -1206,7 +1208,7 @@ const PHASE_DISPLAY = {
 const PHASE_DETAIL = {
   idle:'Idle', starting:'Starting', coding:'Writing code',
   pushing:'Pushing branch', pr:'Opening PR',
-  ci:'Running CI', ci_failed:'CI failed',
+  ci:'Running CI', ci_waiting:'Waiting on CI', ci_failed:'CI failed',
   reviewing:'Code review', retrying:'Fixing feedback',
   merging:'Merging', merge_blocked:'Merge conflict',
   human_review:'Review failed',
@@ -1236,9 +1238,11 @@ async function api(path, opts) {
 }
 
 async function postApi(path, body) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (ADMIN_TOKEN) headers['X-Agentify-Token'] = ADMIN_TOKEN;
   return api(path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(body)
   });
 }
@@ -1731,13 +1735,23 @@ function openLog(issue) {
   document.getElementById('log-subtitle').textContent = 'Loading...';
   document.getElementById('log-pre').textContent = 'Fetching logs...';
   fetchLog();
-  if (logPollTimer) clearInterval(logPollTimer);
-  logPollTimer = setInterval(fetchLog, 3000);
+  if (logStream) logStream.close();
+  logStream = new EventSource(`/worker-log/stream?issue=${issue}`);
+  logStream.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (!data.content) return;
+      const logPre = document.getElementById('log-pre');
+      if (logPre.textContent === 'Fetching logs...') logPre.textContent = '';
+      logPre.textContent += data.content;
+      document.querySelector('.log-body').scrollTop = 999999;
+    } catch(e) {}
+  };
 }
 function closeLog() {
   document.getElementById('log-modal').classList.remove('open');
   selectedLogIssue = null;
-  if (logPollTimer) { clearInterval(logPollTimer); logPollTimer = null; }
+  if (logStream) { logStream.close(); logStream = null; }
 }
 
 async function fetchLog() {
@@ -1753,6 +1767,23 @@ async function fetchLog() {
       document.getElementById('log-pre').textContent = 'No log available for this issue.';
     }
   } catch(e) { document.getElementById('log-pre').textContent = 'Error loading log.'; }
+}
+
+function connectEventStream() {
+  if (eventStream) eventStream.close();
+  eventStream = new EventSource(`/stream?after=${evCount}`);
+  eventStream.onmessage = async (event) => {
+    try {
+      const payload = JSON.parse(event.data);
+      allEvents = allEvents.concat([payload]);
+      evCount = payload.id || evCount;
+      await refresh();
+    } catch(e) {}
+  };
+  eventStream.onerror = () => {
+    if (eventStream) eventStream.close();
+    setTimeout(connectEventStream, 2000);
+  };
 }
 
 // ─── Refresh loop ───
@@ -1809,7 +1840,8 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeLog()
 
 requestNotifications();
 refresh();
-setInterval(refresh, 4000);
+connectEventStream();
+setInterval(refresh, 60000);
 </script>
 
 </body>
